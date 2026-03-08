@@ -34,7 +34,15 @@ _FETCH_PRICE_TOOL: Dict[str, Any] = {
         "description": (
             "Belirtilen malzeme adına göre yakın çevredeki marketlerden "
             "en uygun fiyatı ve market bilgisini döner. "
-            "Bir malzemenin güncel fiyatını öğrenmek istediğinde bu aracı kullan."
+            "Bir malzemenin güncel fiyatını öğrenmek istediğinde bu aracı kullan. "
+            "ZORUNLU FORMAT KURALLARI: "
+            "(1) Süt türevleri → mutlaka '1L' veya '1 Lt' birimi ekle (örn: '1L Tam Yağlı Süt'). "
+            "(2) Şeker/un/pirinç/bakliyat → mutlaka '1kg' veya '1 Kg' birimi ekle (örn: '1kg Toz Şeker'). "
+            "(3) Yumurta → daima '10\'lu Tavuk Yumurtası' veya '15\'li Tavuk Yumurtası' yaz; "
+            "bıldırcın yumurtası yasak. "
+            "(4) Asla 'kremalı', 'gofret', 'aromalı', 'meyveli', 'bisküvi' veya 'çikolatalı' kelimesi kullanma. "
+            "(5) Kakao lazımsa sadece 'Ham Kakao Tozu' veya 'Toz Kakao' yaz. "
+            "(6) Aynı malzeme için bu aracı iki kez çağırma — benzer malzemeleri tek aramada birleştir."
         ),
         "parameters": {
             "type": "object",
@@ -42,9 +50,10 @@ _FETCH_PRICE_TOOL: Dict[str, Any] = {
                 "ingredient": {
                     "type": "string",
                     "description": (
-                        "Fiyatı aranacak malzeme adı. "
-                        "Türkçe, kısa ve aranabilir olsun. "
-                        "Örnekler: 'kuzu but', 'domates', 'zeytinyağı', 'pirinç'."
+                        "Fiyatı aranacak malzeme adı. Türkçe, birim içeren ve aranabilir olsun. "
+                        "Süt türevleri için '1L Tam Yağlı Süt', kuru gıdalar için '1kg Pilavlık Pirinç', "
+                        "yumurta için '10\'lu Tavuk Yumurtası', et için '500g Dana Kıyma' gibi. "
+                        "ASLA tek kelimeyle (örn: 'süt', 'şeker') aratma."
                     ),
                 }
             },
@@ -54,20 +63,67 @@ _FETCH_PRICE_TOOL: Dict[str, Any] = {
 }
 
 _SYSTEM_PROMPT = """\
-Sen deneyimli bir Türk şefsin ve akıllı bir market alışveriş asistanısın.
+Sen "TugrulAI Market Orchestrator" sisteminin beyni olan kıdemli bir şef ve stratejik satın alma uzmanısın.
+Görevin, kullanıcının girdiği yemek tarifini analiz edip, SADECE eksik olan malzemeleri tespit etmek
+ve bunları en doğru formatta markette aratmaktır.
 
-Görevin şu adımları takip etmektir:
-1. Kullanıcının istediği yemek için gerekli tüm malzemeleri belirle.
-2. Kullanıcının elinde zaten bulunan malzemeleri çıkar.
-3. Eksik olan her malzeme için `fetch_ingredient_price` aracını çağır.
-4. Tüm araç çağrıları tamamlanınca aşağıdaki JSON formatında yanıt ver:
-   {"recipe": "<yemek adı>", "summary": "<1–2 cümle kısa özet>"}
+─── GÖREV AKIŞI ───────────────────────────────────────────────────────────────
+1. Kullanıcının yemek tarifini analiz et ve profesyonel, eksiksiz bir malzeme listesi çıkar.
+2. Kullanıcının elindeki malzemeleri tarifle karşılaştır; GERÇEKTEN eksik olanları belirle.
+3. Eksik her malzeme için aşağıdaki Standartlaştırma Kurallarına HARFIYEN uyarak
+   `fetch_ingredient_price` aracını çağır.
+4. Her sonucu kontrol et; tarife uymuyorsa daha spesifik mutfak terimiyle bir kez daha dene.
+5. Tüm fiyatlar onaylandıktan sonra aşağıdaki FINAL ÇIKTI formatında özet ver.
 
-Önemli kurallar:
-- Aracı yalnızca gerçekten eksik olan malzemeler için çağır.
-- Malzeme adlarını kısa ve aranabilir tut (örn: "kırmızı biber" değil "biber").
-- Tüm araç çağrıları tamamlanmadan özet verme.
-- Yanıtın sadece geçerli JSON olsun, başka metin ekleme.
+─── KURAL 1: BİRİM VE MİKTAR ZORUNLULUĞU (SİSTEM GÜVENLİĞİ İÇİN KRİTİK) ─────
+
+  ► Hiçbir malzemeyi ASLA tek kelimeyle aratma (örn: "süt", "şeker" → GEÇERSİZ).
+
+  Süt türevleri (süt, ayran, kefir vb.):
+    ✓ Daima "1L" veya "1 Lt" birimi ekle
+    ✓ Örnek: "1L Tam Yağlı Süt", "1 Lt Yarım Yağlı Süt"
+    ✗ Çocuk sütleri (180ml-200ml), aromalı (çikolatalı/çilekli/meyveli) sütler
+
+  Şeker, un, pirinç, bakliyat ve kuru gıdalar:
+    ✓ Daima "1kg" veya "1 Kg" birimi ekle
+    ✓ Örnek: "1kg Toz Şeker", "1kg Pilavlık Pirinç", "1kg Un"
+    ✗ Bayram şekerleri, şekerlemeler, hazır karışımlar
+
+  Yumurta:
+    ✓ Her zaman "10'lu Tavuk Yumurtası" veya "15'li Tavuk Yumurtası" yaz
+    ✗ "Yumurta" tek başına → GEÇERSİZ
+    ✗ Bıldırcın yumurtası → KESİNLİKLE YASAK
+
+  Diğer malzemeler:
+    ✓ Her malzemeye mutlaka miktar veya form ekle:
+       "500g Süzme Yoğurt", "100g Tereyağı", "250ml Krema", "200g Feta Peyniri"
+
+─── KURAL 2: YASAKLI KELİMELERDEN KAÇIŞ ──────────────────────────────────────
+
+  ✗ Arama terimlerinde ASLA kullanılmayacak kelimeler:
+     "kremalı" | "gofret" | "aromalı" | "meyveli" | "bisküvi" | "çikolatalı"
+
+  ► Kakao gerekiyorsa → sadece "Ham Kakao Tozu" veya "Toz Kakao" kullan.
+  ► Tatlı kaplaması için → "Bitter Kuvertür Çikolata" gibi teknik mutfak terimleri tercih et.
+
+─── KURAL 3: TEKİLLEŞTİRME VE MANTIKlı ARAMA ─────────────────────────────────
+
+  ► Benzer veya birbiri yerine geçebilecek malzemeleri (örn: "şeker" ve "toz şeker")
+    TEK bir arama teriminde birleştir. Aynı ürün için iki kez API isteği atma.
+  ► Gelen fiyat sonucu tarife uymuyorsa (RelevanceScore < 45 veya alakasız ürün),
+    aramayı daha profesyonel ve teknik bir mutfak terimiyle YENİLE.
+  ► Her malzeme için en fazla 2 deneme yap; hâlâ uygun sonuç gelmezse
+    "bulunamadı" olarak işaretle. Hiçbir fiyatı asla uydurma.
+  ► Tüm araç çağrıları tamamlanmadan final özet verme.
+
+─── FINAL ÇIKTI ────────────────────────────────────────────────────────────────
+Sadece geçerli JSON döndür, başka metin yazma:
+{
+  "recipe": "<yemek adı — temiz tarif özeti>",
+  "missing_ingredients": ["<birim+malzeme 1>", "<birim+malzeme 2>"],
+  "total_cost": <bulunan fiyatların sayısal toplamı, float>,
+  "summary": "<temiz tarif özeti + eksik malzemelerin listesi + seçilen ürünlerin birimleriyle fiyatları + toplam maliyet içeren profesyonel rapor>"
+}
 """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -134,9 +190,11 @@ async def run_agentic_extraction(
         },
     ]
 
-    collected_results: List[Dict[str, Any]] = []
+    collected_results_map: Dict[str, Dict[str, Any]] = {}
     recipe_name = "Bilinmiyor"
     summary = ""
+    missing_ingredients: List[str] = []
+    total_cost: Optional[float] = None
 
     for iteration in range(max_iterations):
         response = await client.chat.completions.create(
@@ -172,6 +230,10 @@ async def run_agentic_extraction(
                     parsed = json.loads(assistant_msg.content)
                     recipe_name = parsed.get("recipe", recipe_name)
                     summary = parsed.get("summary", summary)
+                    if isinstance(parsed.get("missing_ingredients"), list):
+                        missing_ingredients = [str(x) for x in parsed["missing_ingredients"]]
+                    if isinstance(parsed.get("total_cost"), (int, float)):
+                        total_cost = float(parsed["total_cost"])
                 except (json.JSONDecodeError, AttributeError):
                     # Model ham metin döndürdüyse mevcut değerleri koru
                     pass
@@ -209,7 +271,18 @@ async def run_agentic_extraction(
             result = await tool_executor(ingredient)
 
             if result:
-                collected_results.append(result)
+                key = str(result.get("Arama") or ingredient).casefold().strip()
+                current = collected_results_map.get(key)
+
+                # Aynı arama terimi birden fazla kez çağrılırsa en iyi skorlu sonucu koru.
+                if current is None:
+                    collected_results_map[key] = result
+                else:
+                    current_score = float(current.get("FinalScore", 0.0))
+                    new_score = float(result.get("FinalScore", 0.0))
+                    if new_score >= current_score:
+                        collected_results_map[key] = result
+
                 content = json.dumps(result, ensure_ascii=False)
             else:
                 content = json.dumps(
@@ -230,6 +303,8 @@ async def run_agentic_extraction(
             f"⚠️ Maksimum ajan iterasyonu ({max_iterations}) aşıldı. Mevcut sonuçlar gösteriliyor."
         )
 
+    collected_results = list(collected_results_map.values())
+
     if not collected_results:
         raise RuntimeError(
             "Ajan hiçbir malzeme için fiyat çekemedi. "
@@ -239,5 +314,7 @@ async def run_agentic_extraction(
     return {
         "recipe": recipe_name,
         "summary": summary,
+        "missing_ingredients": missing_ingredients,
+        "total_cost": total_cost,
         "results": collected_results,
     }

@@ -104,24 +104,43 @@ def _relevance_score(query: str, product_name: str) -> float:
     """
     Arama terimi ile ürün adı arasındaki anlam benzerliğini 0–100 ölçeğinde döner.
 
-    Strateji:
-      - token_set_ratio : "yarım yağlı süt" ↔ "süt" gibi kısmi eşleşmelerde güçlü
-      - partial_ratio   : alt dizi eşleşmelerine duyarlı
-      Her ikisini ağırlıklı ortalamayla birleştirir.
+        Strateji:
+            - ratio           : genel metin benzerliği
+            - token_set_ratio : token bazlı kısmi eşleşmeler
+            - partial_ratio   : alt dizi eşleşmeleri
+
+        Not:
+            Sadece tek kelime geçti diye çok uzun ürün isimlerinin 100 puan almasını
+            engellemek için ratio skoruna daha yüksek ağırlık verilir.
     """
     q = query.casefold().strip()
     p = product_name.casefold().strip()
+
+    query_tokens = [t for t in q.split() if t]
+    product_tokens = [t for t in p.split() if t]
+
+    ratio_score = fuzz.ratio(q, p)
     token_score = fuzz.token_set_ratio(q, p)
     partial_score = fuzz.partial_ratio(q, p)
-    return token_score * 0.6 + partial_score * 0.4
+
+    base_score = ratio_score * 0.6 + token_score * 0.2 + partial_score * 0.2
+
+    # Token focus: tek bir query kelimesi çok uzun ürün adında gömülüyse
+    # alaka skorunu düşür (örn: "kakao" vs "Migros Kids Stick Kakao ...").
+    if query_tokens and product_tokens:
+        focus = min(len(query_tokens), len(product_tokens)) / len(product_tokens)
+        focus_factor = 0.6 + (0.4 * focus)
+        return base_score * focus_factor
+
+    return base_score
 
 
 def _best_product(query: str, products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     Ürün listesinden en alakalı ve ucuz olanı seçer.
 
-    Sıralama kriteri (normalize edilmiş bileşik skor):
-      relevance * 0.5 + cheapness * 0.5
+        Sıralama kriteri (normalize edilmiş bileşik skor):
+            (Alaka * 0.5) + (Ucuzluk * 50)
 
     Bu sayede "süt" araması ucuz ama alakasız "süt tozu" yerine
     "yarım yağlı süt" sonucunu öne çıkarır.
@@ -156,12 +175,14 @@ def _best_product(query: str, products: List[Dict[str, Any]]) -> Optional[Dict[s
 
     scored = []
     for relevance, price, product, depot in candidates:
+        # Fiyat skoru 0-1 aralığında normalize edilir:
+        # en ucuz = 1.0, en pahalı = 0.0
         cheapness = 1.0 - (price - min_p) / price_range
-        combined = relevance * 0.5 + cheapness * 50  # cheapness zaten 0-1, relevance 0-100
-        scored.append((combined, price, product, depot))
+        combined = (relevance * 0.5) + (cheapness * 50)
+        scored.append((combined, price, relevance, cheapness, product, depot))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    _, best_price, best_product, best_depot = scored[0]
+    best_final, best_price, best_relevance, best_cheapness, best_product, best_depot = scored[0]
 
     name = (
         best_product.get("title") or best_product.get("name")
@@ -184,6 +205,9 @@ def _best_product(query: str, products: List[Dict[str, Any]]) -> Optional[Dict[s
         "Market": market,
         "Price": float(best_price),
         "Neighborhood": neighborhood,
+        "RelevanceScore": round(float(best_relevance), 2),
+        "PriceScore": round(float(best_cheapness), 3),
+        "FinalScore": round(float(best_final), 2),
     }
 
 

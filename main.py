@@ -128,13 +128,8 @@ if run_btn:
         st.warning("Lütfen bir yemek isteği girin.")
         st.stop()
 
-    log_area = st.expander("📋 Ajan İşlem Günlüğü", expanded=True)
-    log_placeholder = log_area.empty()
-    log_lines: list[str] = []
-
     async def log_cb(msg: str) -> None:
-        log_lines.append(msg)
-        log_placeholder.markdown("\n\n".join(log_lines))
+        _ = msg
 
     orchestrator = Orchestrator()
 
