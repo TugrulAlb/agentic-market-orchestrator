@@ -1,20 +1,32 @@
 """
 Market Intelligence Graph — State Machine (Durum Makinesi).
 
-Mimari:
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  RECIPE_ANALYZER_NODE  →  [Paralel Market Arama]  →  MARKET_SEARCH_    │
-  │         (Şef)                                        CHECKER_NODE        │
-  │           ↑                                          (Denetçi)           │
-  │           └─────── retry kenarı (MAX 2 kez) ────────────┘               │
-  │                                                          ↓               │
-  │                                               FINAL_REPORT_NODE          │
-  │                                               (Sunucu)                   │
-  └──────────────────────────────────────────────────────────────────────────┘
+Mimari (döngülü):
+
+  RECIPE_ANALYZER_NODE ─────────────────────────────────────────────────────┐
+       (Şef / LLM)                                                           │
+           │  ilk tur + içerik retry                                         │
+           ▼                                                                  │
+    [Paralel Market Araması]    ◄── qty_retry_map (LLM bypass) ─────────┐   │
+           │                                                              │   │
+           ▼                                                              │   │
+  MARKET_SEARCH_CHECKER_NODE                                             │   │
+       (Denetçi)                                                         │   │
+           │                                                              │   │
+     ┌─────┴──────────────────────────────┐                              │   │
+     │                                    │                              │   │
+  Sadece qty        İçerik/alaka         │                              │   │
+  hatası            hatası               │                              │   │
+     │                    │              │                              │   │
+     ▼                    ▼              │                              │   │
+ "market_search"   "recipe_analyzer" ──┘ ──────────────────────────────┘   │
+  (LLM yok,         (LLM ile rafine)                                      │   │
+  filtreli ara)          └──────────────────────────────────────────────┘   │
+     │                                                                       │
+     └── MAX_RETRIES aşıldıysa her iki yol da → FINAL_REPORT_NODE ──────────┘
 
 Her düğüm MarketState sözlüğünü alır, günceller ve döndürür.
-Düğümler arası tüm veri akışı yalnızca MarketState üzerinden gerçekleşir —
-hiçbir düğüm başka bir düğümü doğrudan çağırmaz.
+Düğümler arası tüm veri akışı yalnızca MarketState üzerinden gerçekleşir.
 
 Bu modülde LLM veya HTTP çağrısı yoktur.
 NODE 1 (RECIPE_ANALYZER_NODE) LLM çağrısı services/llm_service.py içindedir.
@@ -45,10 +57,19 @@ class MarketState(TypedDict, total=False):
     # ── MARKET_SEARCH_CHECKER_NODE çıktıları ────────────────────────────────
     cleaned_results: List[Dict[str, Any]]  # Kalite kontrolünden geçmiş sonuçlar
     warnings: List[str]                    # Kullanıcıya bildirilecek uyarılar
-    retry_terms: List[str]                 # Kalite testini geçemeyen terimler
+
+    # Porsiyon/birim hatası: eski_terim → filtreli_yeni_terim
+    # Orchestrator bu haritayla LLM'i ATLAR ve doğrudan marketi yeniden arar.
+    qty_retry_map: Dict[str, str]
+
+    # İçerik/alaka hatası: LLM ile rafine edilmesi gereken terimler
+    content_retry_terms: List[str]
+
+    # Tüm başarısız terimler (qty + content) — analyze_recipe_node'a aktarılır
+    retry_terms: List[str]
 
     # ── Döngü kontrolü ──────────────────────────────────────────────────────
-    retry_count: int              # Kaç kez RECIPE_ANALYZER_NODE'a geri dönüldü
+    retry_count: int              # Kaç kez döngü tekrarlandı (her tur +1)
 
     # ── FINAL_REPORT_NODE çıktıları ─────────────────────────────────────────
     total_cost: float
@@ -64,19 +85,61 @@ class MarketState(TypedDict, total=False):
 MAX_RETRIES: int = 2
 RELEVANCE_THRESHOLD: float = 45.0
 
-# Ürün adında bu kalıplar geçiyorsa → gürültü, temizle + retry
+# ── İçerik Gürültüsü ─────────────────────────────────────────────────────────
+# Ürün adında bu kalıplar geçiyorsa → içerik uyumsuzluğu → LLM retry
 _NOISE_RE = re.compile(
     r"\b(gofret|kremal[iı]|aromal[iı]|meyveli|bisk[uü]vi|çikolatal[iı]|bıldırcın)\b",
     re.IGNORECASE | re.UNICODE,
 )
 
-# "1L / 1 Lt / 1 Litre" içeren arama terimini tanımlar
-_WANT_1L_RE = re.compile(r"\b1\s*[Ll](?:[Tt]|itre)?\b")
+# ── Arama Terimi Birim Algılama ───────────────────────────────────────────────
+# Arama terimi "1L / 1Lt / 1Litre" istiyorsa:
+_WANT_1L_RE = re.compile(r"\b1\s*[Ll](?:[Tt]|itre)?\b", re.IGNORECASE)
+# Arama terimi "1kg / 1Kg / 1kilo / 1kilogram" istiyorsa:
+_WANT_1KG_RE = re.compile(r"\b1\s*k(?:g|ilo(?:gram)?)\b", re.IGNORECASE)
 
-# Ürün adında porsiyon boyutu küçük mü? (≤ 250 ml)
-_SMALL_ML_RE = re.compile(r"\b(1\d{2}|200|180|150|250)\s*ml\b", re.IGNORECASE)
+# ── Ürün Porsiyon Boyutu Algılama (KRİTİK HATA eşiği) ───────────────────────
+# Ürün adında ≤ 750ml varsa (1L istenirken küçük boy geldi)
+_CRT_SMALL_ML_RE = re.compile(
+    r"\b(?:[1-9]\d|1\d{2}|[2-7]\d{2}|750)\s*ml\b",  # 10 ml … 750 ml
+    re.IGNORECASE,
+)
+# Ürün adında ≤ 500g varsa (1kg istenirken küçük paket geldi)
+_CRT_SMALL_G_RE = re.compile(
+    r"\b(?:[1-9]\d|1\d{2}|[2-4]\d{2}|500)\s*g\b",  # 10 g … 500 g
+    re.IGNORECASE,
+)
 
 LogCallback = Callable[[str], Coroutine[Any, Any, None]]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Yardımcı — Porsiyon/Birim Uyumsuzluğu Tespiti
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _qty_mismatch_refined(term: str, product_name: str) -> Optional[str]:
+    """
+    Arama terimi ile bulunan ürün arasında birim uyumsuzluğu varsa
+    daha spesifik (filtreli) bir arama terimi döner; yoksa None.
+
+    Kural:
+        1L istendi + ≤ 750 ml ürün geldi  →  "1L X" → "1000ml X" (daha net)
+        1kg istendi + ≤ 500 g ürün geldi  →  "1kg X" → "1000g X" (daha net)
+
+    '1000ml' / '1000g' şeklinde yazmak market arama motorlarının
+    küçük porsiyonları döndürmesini azaltır.
+    """
+    if _WANT_1L_RE.search(term) and _CRT_SMALL_ML_RE.search(product_name):
+        refined = re.sub(
+            r"\b1\s*[Ll](?:[Tt]|itre)?\b", "1000ml", term, flags=re.IGNORECASE
+        )
+        return refined.strip()
+    if _WANT_1KG_RE.search(term) and _CRT_SMALL_G_RE.search(product_name):
+        refined = re.sub(
+            r"\b1\s*k(?:g|ilo(?:gram)?)\b", "1000g", term, flags=re.IGNORECASE
+        )
+        return refined.strip()
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -88,19 +151,29 @@ async def market_search_checker_node(
     log_cb: LogCallback,
 ) -> MarketState:
     """
-    MARKET_SEARCH_CHECKER_NODE — Ham market sonuçlarını üç kalite kuralıyla denetler.
+    MARKET_SEARCH_CHECKER_NODE — Ham market sonuçlarını dört kalite kuralıyla denetler.
 
-    Kural 1 — Alaka Kontrolü:
-        RelevanceScore < RELEVANCE_THRESHOLD ise sonucu temizle, retry listesine ekle.
+    Kural 1 — Gürültü Filtresi (İçerik):
+        Ürün adında yasaklı kelime (gofret, kremalı, bıldırcın, vb.) varsa
+        → temizle, content_retry_terms'e ekle (LLM rafine edecek).
 
-    Kural 2 — Gürültü Filtresi:
-        Ürün adında yasaklı kelime (gofret, kremalı, vb.) varsa temizle, retry ekle.
+    Kural 2 — Alaka Skoru:
+        RelevanceScore < RELEVANCE_THRESHOLD ise
+        → temizle, content_retry_terms'e ekle (LLM rafine edecek).
 
-    Kural 3 — Porsiyon Uyarısı:
-        Arama terimi "1L" içeriyor ama ürün ≤ 250 ml geliyorsa kullanıcıya uyar
-        (ürün temizlenmez, yalnızca uyarı üretilir).
+    Kural 3 — Porsiyon/Birim Uyumsuzluğu (KRİTİK HATA):
+        1L istenirken ≤ 750 ml    veya   1kg istenirken ≤ 500 g gelirse
+        → temizle, qty_retry_map'e ekle (LLM ATLANIYOR, doğrudan markete geri dön).
+        → Kullanıcıya uyarı üret.
+
+    Kural 4 — Sonuç Yok:
+        Market API sonuç döndürmediyse
+        → content_retry_terms'e ekle (LLM yeni terim önerecek).
 
     Edge kararı: `should_retry()` ile belirlenir.
+        qty_retry_map dolu  → "market_search"   (LLM bypass, filtreli arama)
+        content_retry_terms dolu → "recipe_analyzer" (LLM refinement)
+        ikisi de boş        → "final_report"
     """
     await log_cb("🔍 **Denetçi Düğümü** — Market sonuçları kalite kontrolünden geçiyor…")
 
@@ -108,7 +181,8 @@ async def market_search_checker_node(
     search_terms: List[str] = state.get("search_terms", [])
     warnings: List[str] = list(state.get("warnings", []))
     cleaned: List[Dict[str, Any]] = []
-    retry_terms: List[str] = []
+    content_retry_terms: List[str] = []   # → LLM yoluna
+    qty_retry_map: Dict[str, str] = {}    # → Doğrudan market yoluna
 
     # Arama terimi → sonuç haritası (O(1) erişim)
     by_term: Dict[str, Dict[str, Any]] = {
@@ -118,50 +192,60 @@ async def market_search_checker_node(
     for term in search_terms:
         result = by_term.get(term)
 
-        # Sonuç hiç gelmedi
+        # ── Kural 4: Sonuç yok ───────────────────────────────────────────────
         if result is None:
-            await log_cb(f"⚠️  **{term}** → Sonuç yok, yeniden denenecek.")
-            retry_terms.append(term)
+            await log_cb(f"⚠️  **{term}** → Sonuç yok, LLM ile yeni terim denenecek.")
+            content_retry_terms.append(term)
             continue
 
         product_name: str = result.get("Product", "")
         relevance: float = float(result.get("RelevanceScore", 0))
 
-        # ── Kural 2: Gürültü filtresi ─────────────────────────────────────────
+        # ── Kural 1: Gürültü / İçerik uyumsuzluğu ───────────────────────────
         if _NOISE_RE.search(product_name):
             await log_cb(
-                f"🚫 **{term}** → '{product_name}' gürültü içeriyor, temizlendi."
+                f"🚫 **{term}** → '{product_name}' içerik uyumsuzluğu, "
+                "LLM ile rafine edilecek."
             )
-            retry_terms.append(term)
+            content_retry_terms.append(term)
             continue
 
-        # ── Kural 1: Alaka skoru ──────────────────────────────────────────────
+        # ── Kural 2: Alaka skoru ─────────────────────────────────────────────
         if relevance < RELEVANCE_THRESHOLD:
             await log_cb(
                 f"📉 **{term}** → Alaka skoru düşük ({relevance:.0f}), "
-                f"yeniden aranacak."
+                "LLM ile rafine edilecek."
             )
-            retry_terms.append(term)
+            content_retry_terms.append(term)
             continue
 
-        # ── Kural 3: Porsiyon uyarısı (temizleme yok, sadece bilgi) ──────────
-        if _WANT_1L_RE.search(term) and _SMALL_ML_RE.search(product_name):
+        # ── Kural 3: Porsiyon/Birim Uyumsuzluğu (KRİTİK) ────────────────────
+        refined = _qty_mismatch_refined(term, product_name)
+        if refined is not None:
+            qty_retry_map[term] = refined
             msg = (
-                f"⚠️ Porsiyon uyarısı: '{term}' için '{product_name}' bulundu — "
-                "miktar yetersiz olabilir."
+                f"🚨 **Porsiyon Hatası** — '{term}' için '{product_name}' bulundu. "
+                f"Birim uyumsuzluğu: 200ml/100g olan ürünler elendi. "
+                f"Filtreli arama başlatılıyor → '{refined}'"
             )
             warnings.append(msg)
             await log_cb(msg)
+            continue  # Bu ürün temizlendi; LLM'e değil, doğrudan markete gidecek
 
         cleaned.append(result)
 
     state["cleaned_results"] = cleaned
     state["warnings"] = warnings
-    state["retry_terms"] = retry_terms
+    state["qty_retry_map"] = qty_retry_map
+    state["content_retry_terms"] = content_retry_terms
+    # retry_terms = tüm başarısızlar (analyze_recipe_node uyumluluğu için)
+    state["retry_terms"] = content_retry_terms + list(qty_retry_map.keys())
 
     await log_cb(
-        f"✅ **Denetçi** — {len(cleaned)} geçerli sonuç | "
-        f"{len(retry_terms)} yeniden arama | {len(warnings)} uyarı"
+        f"✅ **Denetçi** — {len(cleaned)} geçerli | "
+        f"{len(qty_retry_map)} porsiyon hatası (doğrudan market) | "
+        f"{len(content_retry_terms)} içerik hatası (LLM) | "
+        f"{len(warnings)} uyarı"
     )
     return state
 
@@ -174,12 +258,32 @@ def should_retry(state: MarketState) -> str:
     """
     MARKET_SEARCH_CHECKER_NODE sonrasındaki koşullu kenar (conditional edge).
 
-    Returns:
-        "retry"        → RECIPE_ANALYZER_NODE'a geri dön (terimi rafine et)
-        "final_report" → FINAL_REPORT_NODE'a ilerle
+    Öncelik sırası:
+        1. Max retry aşıldıysa her zaman → "final_report"
+        2. Porsiyon/birim hatası (qty_retry_map)  → "market_search"
+           LLM ATLANIR; orchestrator filtreli terimlerle doğrudan yeniden arar.
+        3. İçerik/alaka hatası (content_retry_terms) → "recipe_analyzer"
+           LLM yeni arama terimi üretir.
+        4. Her şey temiz → "final_report"
+
+    Not: qty VE content hatası aynı anda varsa content_retry_terms'e
+    qty hataları da eklenir (LLM tümünü birlikte rafine eder).
+    Bu nedenle qty_only olduğunda önce hızlı market yolu denenir.
     """
-    if state.get("retry_terms") and state.get("retry_count", 0) < MAX_RETRIES:
-        return "retry"
+    if state.get("retry_count", 0) >= MAX_RETRIES:
+        return "final_report"
+
+    has_qty = bool(state.get("qty_retry_map"))
+    has_content = bool(state.get("content_retry_terms"))
+
+    if has_qty and not has_content:
+        # Sadece birim/porsiyon sorunu → LLM'i atla, filtreli terimle markete git
+        return "market_search"
+    if has_content:
+        # İçerik/alaka sorunu var (qty ile karışık da olabilir) → LLM yoluna
+        # qty_retry_map'teki terimler de content_retry_terms'e dahil edilir
+        # (bu birleştirme orchestrator'da yapılır)
+        return "recipe_analyzer"
     return "final_report"
 
 
@@ -194,16 +298,32 @@ async def final_report_node(
     """
     FINAL_REPORT_NODE — Temizlenmiş veriden profesyonel final raporunu derler.
 
+    Sadece `cleaned_results` içindeki (tüm kalite kurallarını geçmiş) ürünler
+    rapora dahil edilir. Çözümlenemeyen terimler `unresolved_terms` listesinde
+    kullanıcıya bildirilir.
+
     Hesaplamalar:
         total_cost      : cleaned_results içindeki Price toplamı
         market_totals   : Market → toplam harcama haritası
         cheapest_market : market_totals'ta en düşük toplam harcamalı market
+        unresolved_terms: MAX_RETRIES sonunda hâlâ eşleştirilemeyen terimler
     """
     await log_cb("📝 **Sunucu Düğümü** — Final rapor hazırlanıyor…")
 
     results: List[Dict[str, Any]] = state.get("cleaned_results", [])
     recipe_name: str = state.get("recipe_name", "Bilinmiyor")
-    warnings: List[str] = state.get("warnings", [])
+    warnings: List[str] = list(state.get("warnings", []))
+
+    # ── Çözümlenemeyen terimler ───────────────────────────────────────────────
+    # search_terms içinde olup cleaned_results'ta karşılığı olmayan terimler
+    resolved_keys = {r.get("Arama", "") for r in results}
+    unresolved_terms: List[str] = [
+        t for t in state.get("search_terms", []) if t not in resolved_keys
+    ]
+    for ut in unresolved_terms:
+        msg = f"❌ '{ut}' için uygun ürün bulunamadı — listeden çıkarıldı."
+        warnings.append(msg)
+        await log_cb(msg)
 
     total_cost: float = sum(float(r.get("Price", 0)) for r in results)
 
@@ -221,18 +341,21 @@ async def final_report_node(
     state["total_cost"] = round(total_cost, 2)
     state["cheapest_market"] = cheapest_market
     state["market_totals"] = market_totals
+    state["warnings"] = warnings
     state["final_report"] = {
         "recipe": recipe_name,
         "results": results,
         "total_cost": round(total_cost, 2),
         "cheapest_market": cheapest_market,
         "warnings": warnings,
+        "unresolved_terms": unresolved_terms,
         "market_totals": market_totals,
     }
 
     await log_cb(
         f"🏁 **{recipe_name}** | "
         f"Toplam: {total_cost:.2f} ₺ | "
-        f"En Avantajlı Market: **{cheapest_market or '—'}**"
+        f"En Avantajlı Market: **{cheapest_market or '—'}** | "
+        f"{len(unresolved_terms)} çözümsüz kalem"
     )
     return state

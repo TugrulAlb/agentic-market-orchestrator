@@ -150,9 +150,17 @@ if run_btn:
 
         # ── Uyarılar (Denetçi Düğümü çıktısı) ────────────────────────────────
         if warnings:
-            with st.expander("⚠️ Denetçi Uyarıları", expanded=True):
-                for w in warnings:
-                    st.warning(w)
+            # Porsiyon hatalarını (🚨) ve çözümsüz kalemleri (❌) ayır
+            critical = [w for w in warnings if w.startswith("🚨") or w.startswith("❌")]
+            informational = [w for w in warnings if w not in critical]
+            if critical:
+                with st.expander("🚨 Porsiyon / Uyumsuzluk Uyarıları", expanded=True):
+                    for w in critical:
+                        st.error(w)
+            if informational:
+                with st.expander("⚠️ Diğer Uyarılar"):
+                    for w in informational:
+                        st.warning(w)
 
         st.subheader("📊 Fiyat Tablosu")
 
