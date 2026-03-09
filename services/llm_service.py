@@ -70,63 +70,43 @@ ve bunları en doğru formatta markette aratmaktır.
 ─── GÖREV AKIŞI ───────────────────────────────────────────────────────────────
 1. Kullanıcının yemek tarifini analiz et ve profesyonel, eksiksiz bir malzeme listesi çıkar.
 2. Kullanıcının elindeki malzemeleri tarifle karşılaştır; GERÇEKTEN eksik olanları belirle.
-3. Eksik her malzeme için aşağıdaki Standartlaştırma Kurallarına HARFIYEN uyarak
-   `fetch_ingredient_price` aracını çağır.
+3. Eksik her malzeme için aşağıdaki kurallara HARFIYEN uyarak `fetch_ingredient_price` aracını çağır.
 4. Her sonucu kontrol et; tarife uymuyorsa daha spesifik mutfak terimiyle bir kez daha dene.
 5. Tüm fiyatlar onaylandıktan sonra aşağıdaki FINAL ÇIKTI formatında özet ver.
 
-─── KURAL 0: PORSİYON / GERÇEKÇİ MİKTAR ──────────────────────────────────────
+─── KURAL 1: PORSİYONA GÖRE GERÇEKÇİ MİKTAR (EN ÖNEMLİ KURAL) ───────────────
 
-  ► Kullanıcı "X kişilik" diyorsa, market paketlerini buna göre seç.
-  ► Fazla satın almaktan kaçın — en küçük yeterli paket boyutunu seç.
+  Kullanıcı kaç kişilik söylüyorsa, o tarif için gerçekten ne kadar lazımsa onu ara.
+  ASLA standart "1 Kg" veya "1 Lt" paket alma — sadece ihtiyaç kadarını al.
 
-  Örnekler (4 kişilik tiramisu için):
-    ✓ "Kakao Tozu 100 G" (1kg değil)       ✓ "Toz Şeker 500 G" (1kg değil)
-    ✓ "Mascarpone Peyniri 250 G"           ✓ "Filtre Kahve 100 G" (granül de olur)
-    ✓ "Tam Yağlı Süt 500 Ml"              ✓ "Tereyağı 100 G"
-    ✓ "Yumurta 6 Li" veya "Yumurta 10 Lu" (tarife göre)
+  ┌─────────────────┬──────────────┬──────────────┬──────────────┐
+  │ Malzeme         │ 2 kişilik    │ 4 kişilik    │ 6 kişilik    │
+  ├─────────────────┼──────────────┼──────────────┼──────────────┤
+  │ Un              │ 250 G        │ 500 G        │ 500 G        │
+  │ Toz Şeker       │ 250 G        │ 500 G        │ 500 G        │
+  │ Tereyağı        │ 100 G        │ 100 G        │ 200 G        │
+  │ Süt             │ 500 Ml       │ 1 Lt         │ 1 Lt         │
+  │ Yumurta         │ 6 Li         │ 6 Li         │ 10 Lu        │
+  │ Mascarpone      │ 250 G        │ 250 G        │ 500 G        │
+  │ Kakao Tozu      │ 50 G         │ 100 G        │ 100 G        │
+  │ Kahve (espresso)│ 100 G        │ 100 G        │ 250 G        │
+  └─────────────────┴──────────────┴──────────────┴──────────────┘
 
-  ► Kuru gıdalar için varsayılan "1 Kg" kullan YALNIZCA gerçekten 1kg gerekiyorsa.
-    (4 kişilik tarifte un, şeker genellikle 250-500g yeter)
+  Yumurta için: önce "Yumurta 6 Li" dene, yoksa "Yumurta 10 Lu" dene.
+  Kahve için: "Espresso Kahve 100 G" veya "Türk Kahvesi 100 G" — kapsül/pad YASAK.
 
+─── KURAL 2: ARAMA TERİMİ FORMATI ────────────────────────────────────────────
 
+  ► Miktar ve birim SONDA gelir: "Toz Şeker 500 G" ✓ — "500g Toz Şeker" ✗
+  ► ASLA tek kelimeyle aratma: "şeker", "süt" → GEÇERSİZ
+  ► Kedi Dili Bisküvi → Tiramisu için gerekli, kullanılabilir
+  ► Kakao → "Kakao Tozu" veya "Toz Kakao" (Nesquik/çocuk içeceği değil)
+  ► ASLA kullanma: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı" | "kapsül" | "pad"
 
-  ► Hiçbir malzemeyi ASLA tek kelimeyle aratma (örn: "süt", "şeker" → GEÇERSİZ).
-  ► Miktar ve birim SONDA gelir — BAŞTA değil.
+─── KURAL 3: TEKİLLEŞTİRME ───────────────────────────────────────────────────
 
-  Süt türevleri:
-    ✓ "Tam Yağlı Süt 1 Lt", "Yarım Yağlı Süt 1 Lt"
-    ✗ "1L Tam Yağlı Süt" → GEÇERSİZ (miktar başta olamaz)
-    ✗ Çocuk sütleri (200ml), aromalı sütler
-
-  Şeker, un, pirinç, bakliyat:
-    ✓ "Toz Şeker 1 Kg", "Buğday Unu 1 Kg", "Pilavlık Pirinç 1 Kg"
-    ✗ "1kg Toz Şeker" → GEÇERSİZ (miktar başta olamaz)
-
-  Yumurta:
-    ✓ "Yumurta 10 Lu" veya "Yumurta 15 Li"
-    ✗ "10'lu Tavuk Yumurtası" → GEÇERSİZ
-    ✗ Bıldırcın yumurtası → KESİNLİKLE YASAK
-
-  Diğer malzemeler (miktar SONDA):
-    ✓ "Tereyağı 100 G", "Süzme Yoğurt 500 G", "Krema 200 Ml", "Feta Peyniri 200 G"
-
-─── KURAL 2: YASAKLI KELİMELERDEN KAÇIŞ ──────────────────────────────────────
-
-  ✗ ASLA kullanılmayacak: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı"
-  ✓ Kedi Dili Bisküvi → Tiramisu için GEREKLİ, kullanılabilir
-  ► Kakao → "Kakao Tozu" (Nesquik veya çocuk içeceği değil, pişirme kakaosu)
-  ► Tatlı kaplaması → "Bitter Kuvertür Çikolata"
-
-─── KURAL 3: TEKİLLEŞTİRME VE MANTIKlı ARAMA ─────────────────────────────────
-
-  ► Benzer veya birbiri yerine geçebilecek malzemeleri (örn: "şeker" ve "toz şeker")
-    TEK bir arama teriminde birleştir. Aynı ürün için iki kez API isteği atma.
-  ► Gelen fiyat sonucu tarife uymuyorsa (RelevanceScore < 45 veya alakasız ürün),
-    aramayı daha profesyonel ve teknik bir mutfak terimiyle YENİLE.
-  ► Her malzeme için en fazla 2 deneme yap; hâlâ uygun sonuç gelmezse
-    "bulunamadı" olarak işaretle. Hiçbir fiyatı asla uydurma.
-  ► Tüm araç çağrıları tamamlanmadan final özet verme.
+  ► Benzer malzemeleri TEK aramada birleştir. Aynı ürün için iki kez API isteği atma.
+  ► Hiçbir fiyatı asla uydurma. Tüm araç çağrıları tamamlanmadan final özet verme.
 
 ─── FINAL ÇIKTI ────────────────────────────────────────────────────────────────
 Sadece geçerli JSON döndür, başka metin yazma:
@@ -338,21 +318,34 @@ async def run_agentic_extraction(
 
 _ANALYZER_SYSTEM_PROMPT = """\
 Sen bir profesyonel şef ve stratejik satın alma uzmanısın.
-Görevin: kullanıcının yemek isteğini ve elimdeki malzemeleri analiz ederek
-tarifte GERÇEKTEN eksik olan malzemeleri standart market arama terimlerine dönüştürmek.
+Görevin: kullanıcının yemek isteğini, porsiyonunu ve elimdeki malzemeleri analiz ederek
+tarifte GERÇEKTEN eksik olan malzemeleri doğru miktarda market arama terimlerine dönüştürmek.
 
-─── STANDARTLAŞTIRMA KURALLARI (KESİNLİKLE UYGULANACAK) ────────────────────────
+─── PORSIYON BAZLI MİKTAR TABLOSU ────────────────────────────────────────────
+Kullanıcı kaç kişilik söylüyorsa o miktarı kullan — ASLA "1 Kg" veya "1 Lt" default alma.
 
-Süt türevleri  → Daima "1L" birimi ekle  │ Örn: "1L Tam Yağlı Süt"
-Kuru gıdalar   → Daima "1kg" birimi ekle  │ Örn: "1kg Toz Şeker", "1kg Pilavlık Pirinç"
-Yumurta        → "10'lu Tavuk Yumurtası" veya "15'li Tavuk Yumurtası"  (bıldırcın YASAK)
-Diğerleri      → Miktar + form zorunlu    │ Örn: "500g Dana Kıyma", "100g Tereyağı"
+  ┌─────────────────┬──────────────┬──────────────┬──────────────┐
+  │ Malzeme         │ 2 kişilik    │ 4 kişilik    │ 6 kişilik    │
+  ├─────────────────┼──────────────┼──────────────┼──────────────┤
+  │ Un              │ 250 G        │ 500 G        │ 500 G        │
+  │ Toz Şeker       │ 250 G        │ 500 G        │ 500 G        │
+  │ Tereyağı        │ 100 G        │ 100 G        │ 200 G        │
+  │ Süt             │ 500 Ml       │ 1 Lt         │ 1 Lt         │
+  │ Yumurta         │ 6 Li         │ 6 Li         │ 10 Lu        │
+  │ Mascarpone      │ 250 G        │ 250 G        │ 500 G        │
+  │ Kakao Tozu      │ 50 G         │ 100 G        │ 100 G        │
+  │ Kahve           │ 100 G        │ 100 G        │ 250 G        │
+  └─────────────────┴──────────────┴──────────────┴──────────────┘
 
-ASLA tek kelime kullanma ("süt", "şeker" → GEÇERSİZ).
-ASLA kullanma: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı"
-Kedi Dili bisküvi → Tiramisu için GEREKLİ, "Kedi Dili Bisküvi" şeklinde ara (yasak değil).
-Kakao gerekirse → "Kakao Tozu" (Nesquik veya aromalı kakao değil)
-Benzer malzemeleri (örn: "şeker" + "toz şeker") TEK arama teriminde birleştir.
+─── FORMAT KURALLARI ──────────────────────────────────────────────────────────
+► Miktar SONDA: "Toz Şeker 500 G" ✓ — "500g Toz Şeker" ✗
+► ASLA tek kelime: "şeker", "süt" → GEÇERSİZ
+► Yumurta: önce "Yumurta 6 Li", yoksa "Yumurta 10 Lu"
+► Kahve: "Espresso Kahve 100 G" veya "Türk Kahvesi 100 G" — kapsül/pad YASAK
+► Kakao: "Kakao Tozu 100 G" (Nesquik değil, pişirme kakaosu)
+► Kedi Dili Bisküvi → Tiramisu için GEREKLİ, kullanılabilir
+► ASLA: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı" | "kapsül"
+► Benzer malzemeleri TEK terimde birleştir.
 """
 
 _SET_ANALYSIS_TOOL: Dict[str, Any] = {
@@ -371,9 +364,11 @@ _SET_ANALYSIS_TOOL: Dict[str, Any] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Markette aranacak standart terimler listesi. "
-                        "Her eleman birim içermeli: '1L Tam Yağlı Süt', "
-                        "'1kg Toz Şeker', '10\\'lu Tavuk Yumurtası', vb."
+                        "Markette aranacak terimler. Format: 'Ürün Adı Miktar Birim' (miktar SONDA). "
+                        "Porsiyon tablosuna göre gerçekçi miktarlar: "
+                        "'Toz Şeker 500 G', 'Tam Yağlı Süt 500 Ml', 'Yumurta 6 Li', "
+                        "'Kakao Tozu 100 G', 'Espresso Kahve 100 G'. "
+                        "ASLA '1 Kg' veya '1 Lt' default alma."
                     ),
                 },
             },

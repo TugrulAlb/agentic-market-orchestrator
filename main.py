@@ -1,17 +1,17 @@
 """
-main.py — Streamlit Arayüzü
+main.py — Streamlit Arayüzü (v2 — Sohbet + Onay Akışı)
 
-Bu dosya YALNIZCA UI mantığı içerir.
-İş mantığı, API istekleri, LLM çağrıları veya geo kodlama **bu dosyada yoktur**.
-Tüm iş yükü Orchestrator sınıfına delege edilir.
-
-Çalıştırmak için:
-    streamlit run main.py
+Akış:
+  Aşama 1 (CHAT)    : LLM ile tarif sohbeti, malzeme listesi oluştur/düzenle
+  Aşama 2 (MARKET)  : Onaylanan listeyle market araması yap, fiyatları getir
 """
 
 import asyncio
+import json
+from typing import Any
 
 import streamlit as st
+from openai import AsyncAzureOpenAI
 
 from clients.market_api import Location
 from core.config import get_settings
@@ -19,7 +19,7 @@ from core.orchestrator import Orchestrator
 from utils.geo_helpers import get_districts, get_provinces, resolve_coordinates
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sayfa yapılandırması
+# Sayfa Yapılandırması
 # ──────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -29,32 +29,48 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
-    .stButton > button {
-        background: linear-gradient(135deg, #e63946, #c1121f);
-        color: white; border: none; border-radius: 8px;
-        font-weight: 700; padding: 0.6rem 1.4rem;
-    }
-    .stButton > button:hover { opacity: 0.9; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
+.stButton > button {
+    background: linear-gradient(135deg, #e63946, #c1121f);
+    color: white; border: none; border-radius: 8px;
+    font-weight: 700; padding: 0.6rem 1.4rem;
+}
+.stButton > button:hover { opacity: 0.9; }
+.ingredient-card {
+    background: #1e1e2e; border: 1px solid #333;
+    border-radius: 8px; padding: 8px 12px; margin: 4px 0;
+    display: flex; justify-content: space-between; align-items: center;
+}
+</style>
+""", unsafe_allow_html=True)
 
 st.markdown(
     "<h1 style='text-align:center;color:#e63946;'>🛒 AI Market Asistanı</h1>"
-    "<p style='text-align:center;color:#6c757d;'>"
-    "Konumunuza göre — En Ucuz Market Fiyatları (Agentic AI)</p>",
+    "<p style='text-align:center;color:#6c757d;'>Konumunuza göre — En Ucuz Market Fiyatları</p>",
     unsafe_allow_html=True,
 )
 st.divider()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Kenar Çubuğu (Sidebar)
+# Session State Başlangıcı
+# ──────────────────────────────────────────────────────────────────────────────
+
+if "phase" not in st.session_state:
+    st.session_state.phase = "chat"          # "chat" | "market"
+if "messages" not in st.session_state:
+    st.session_state.messages = []           # sohbet geçmişi
+if "ingredients" not in st.session_state:
+    st.session_state.ingredients = []        # onaylı malzeme listesi
+if "recipe_name" not in st.session_state:
+    st.session_state.recipe_name = ""
+if "servings" not in st.session_state:
+    st.session_state.servings = 4
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sidebar — Konum & Ayarlar
 # ──────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -72,14 +88,8 @@ with st.sidebar:
     selected_district = st.selectbox("🏘️ İlçe", districts) if districts else ""
 
     coords, used_fallback = resolve_coordinates(selected_province, selected_district)
-
-    if selected_district:
-        st.markdown(f"**Seçim:** {selected_province} / {selected_district}")
-    else:
-        st.markdown(f"**Seçim:** {selected_province}")
-
     if used_fallback and selected_province != "Konya":
-        st.warning("Konum çözümlenemedi — geçici olarak Konya merkeziyle arama yapılıyor.")
+        st.warning("Konum çözümlenemedi — Konya merkezi kullanılıyor.")
 
     lat, lon = coords
     loc = Location(
@@ -96,78 +106,211 @@ with st.sidebar:
     )
 
     st.divider()
+
+    # Sıfırlama butonu
+    if st.button("🔄 Yeni Tarif Başlat"):
+        st.session_state.phase = "chat"
+        st.session_state.messages = []
+        st.session_state.ingredients = []
+        st.session_state.recipe_name = ""
+        st.rerun()
+
     st.caption("İpucu: Arama mesafesini artırırsanız daha fazla market sonucu çıkar.")
 
     settings = get_settings()
     if not settings.is_llm_configured:
-        st.warning(
-            "Tarif analizi için Azure anahtarları eksik. "
-            "`.env` veya `.streamlit/secrets.toml` dosyasına "
-            "`AZURE_ENDPOINT` ve `AZURE_API_KEY` ekleyin."
-        )
+        st.warning("Azure anahtarları eksik. `.env` dosyasına ekleyin.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Ana Giriş
+# AŞAMA 1: SOHBET
 # ──────────────────────────────────────────────────────────────────────────────
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    recipe_request = st.text_input(
-        "Ne pişirmek istiyorsunuz?",
-        value="Tiramisu yapmak istiyorum",
+CHEF_SYSTEM_PROMPT = """\
+Sen deneyimli bir Türk şefi ve market alışverişi uzmanısın.
+Kullanıcı bir yemek yapmak istiyor. Görevin:
+
+1. Kullanıcının tarifini anla, kaç kişilik olduğunu sor (söylemediyse).
+2. O tarif için gerçekçi malzeme listesi öner — porsiyona göre doğru miktarlarda.
+3. Kullanıcının düzeltmelerini dinle ve listeyi güncelle.
+4. Kullanıcı onayladığında SADECE şu JSON'u ver, başka hiçbir şey yazma:
+
+{"recipe_name": "...", "servings": N, "ingredients": ["Malzeme Miktar Birim", ...]}
+
+FORMAT KURALLARI (ÇOK ÖNEMLİ):
+- Miktar SONDA: "Toz Şeker 500 G" ✓ — "500g Toz Şeker" ✗
+- ASLA "X Adet" formatı kullanma → "1 Paket" veya "1 Kutu" de
+- Kedi Dili Bisküvi → "Kedi Dili Bisküvi 1 Paket"
+- Kahve: granül/öğütülmüş gram olarak → "Nescafe Granül Kahve 100 G" veya kullanıcı "2 kaşık yeter" diyorsa "Nescafe Granül Kahve 50 G"
+- Kahve kapsül/pad YASAK
+- Kakao: "Kakao Tozu 50 G" (Nesquik değil)
+
+PORSIYON REHBERİ:
+- 2 kişilik: Yumurta 6 Li, Toz Şeker 250 G, Un 250 G, Süt 500 Ml, Tereyağı 100 G
+- 4 kişilik: Yumurta 6 Li, Toz Şeker 500 G, Un 500 G, Süt 1 Lt, Tereyağı 100 G
+- Kullanıcı özel miktar söylüyorsa (örn: "nescafe 2 adet yeter") → o miktarı kullan
+
+Türkçe konuş. Sıcak ve yardımsever ol. Onay gelmeden JSON verme. Onay gelince YALNIZCA JSON ver.
+"""
+
+
+async def chat_with_chef(messages: list) -> str:
+    """LLM şef ile sohbet — streaming yanıt."""
+    s = get_settings()
+    client = AsyncAzureOpenAI(
+        azure_endpoint=s.azure_endpoint,
+        api_key=s.azure_api_key,
+        api_version=s.azure_api_ver,
     )
-with col2:
-    servings = st.selectbox(
-        "👥 Kaç Kişilik?",
-        options=[1, 2, 3, 4, 5, 6, 8, 10],
-        index=3,
+    response = await client.chat.completions.create(
+        model=s.gpt_deployment,
+        messages=[{"role": "system", "content": CHEF_SYSTEM_PROMPT}] + messages,
+        temperature=0.7,
+        max_tokens=800,
     )
+    return response.choices[0].message.content or ""
 
-run_btn = st.button("🚀 Fiyatları Getir", type="primary")
 
-if run_btn:
-    if not recipe_request.strip():
-        st.warning("Lütfen bir yemek isteği girin.")
-        st.stop()
+def extract_json_from_reply(text: str) -> dict | None:
+    """LLM yanıtından JSON bloğunu çıkar."""
+    import re
+    # ```json ... ``` bloğu
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    # Düz { ... } bloğu
+    m = re.search(r"\{[^{}]*\"ingredients\"[^{}]*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return None
 
-    log_container = st.empty()
-    log_lines: list[str] = []
+
+if st.session_state.phase == "chat":
+
+    col_chat, col_list = st.columns([2, 1])
+
+    with col_chat:
+        st.subheader("👨‍🍳 Şef ile Tarif Planla")
+
+        # Sohbet geçmişini göster
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"], avatar="👨‍🍳" if msg["role"] == "assistant" else "🧑"):
+                st.markdown(msg["content"])
+
+        # Kullanıcı girişi
+        user_input = st.chat_input("Ne pişirmek istiyorsunuz? (örn: 2 kişilik tiramisu)")
+
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+
+            with st.chat_message("assistant", avatar="👨‍🍳"):
+                with st.spinner("Şef düşünüyor…"):
+                    reply = asyncio.run(chat_with_chef(st.session_state.messages))
+
+                # JSON içeriyorsa kullanıcıya gösterme — sadece onay mesajı
+                parsed = extract_json_from_reply(reply)
+                if parsed and "ingredients" in parsed:
+                    st.session_state.ingredients = parsed["ingredients"]
+                    st.session_state.recipe_name = parsed.get("recipe_name", "Tarif")
+                    st.session_state.servings = parsed.get("servings", 4)
+                    display_reply = (
+                        f"✅ **{st.session_state.recipe_name}** için alışveriş listesi hazırlandı! "
+                        f"Sağda listeyi inceleyebilir, düzenleyebilirsiniz. "
+                        f"Hazırsan **🛒 Fiyatları Getir!** butonuna tıkla."
+                    )
+                else:
+                    display_reply = reply
+
+                st.markdown(display_reply)
+
+            # Sohbet geçmişine orijinal yanıtı sakla (LLM context için)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+            st.rerun()
+
+    with col_list:
+        st.subheader("📋 Malzeme Listesi")
+
+        if not st.session_state.ingredients:
+            st.info("Şefle konuşarak tarifinizi planlayın.\nListeyi onayladığınızda fiyatlar getirilir.")
+        else:
+            st.success(f"**{st.session_state.recipe_name}** — {st.session_state.servings} kişilik")
+
+            # Düzenlenebilir liste
+            edited = []
+            for i, item in enumerate(st.session_state.ingredients):
+                col_a, col_b = st.columns([4, 1])
+                with col_a:
+                    new_val = st.text_input(f"#{i+1}", value=item, key=f"ing_{i}", label_visibility="collapsed")
+                    edited.append(new_val)
+                with col_b:
+                    if st.button("✕", key=f"del_{i}"):
+                        st.session_state.ingredients.pop(i)
+                        st.rerun()
+
+            st.session_state.ingredients = [e for e in edited if e.strip()]
+
+            # Yeni malzeme ekle
+            new_item = st.text_input("➕ Malzeme ekle", key="new_ing", placeholder="örn: Vanilin 1 Paket")
+            if new_item.strip():
+                st.session_state.ingredients.append(new_item.strip())
+                st.rerun()
+
+            st.divider()
+
+            if st.button("🛒 Fiyatları Getir!", type="primary", use_container_width=True):
+                st.session_state.phase = "market"
+                st.rerun()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AŞAMA 2: MARKET FİYATLARI
+# ──────────────────────────────────────────────────────────────────────────────
+
+elif st.session_state.phase == "market":
+
+    st.subheader(f"🛒 {st.session_state.recipe_name} — Market Fiyatları")
+
+    if st.button("← Malzeme Listesine Dön"):
+        st.session_state.phase = "chat"
+        st.rerun()
+
+    # Onaylanan malzeme listesini göster
+    with st.expander("📋 Alışveriş Listesi", expanded=False):
+        for item in st.session_state.ingredients:
+            st.markdown(f"- {item}")
+
+    # Malzeme listesinden recipe_request oluştur
+    ingredients_str = ", ".join(st.session_state.ingredients)
+    recipe_request = (
+        f"{st.session_state.recipe_name} ({st.session_state.servings} kişilik). "
+        f"Gerekli malzemeler: {ingredients_str}"
+    )
 
     async def log_cb(msg: str) -> None:
-        log_lines.append(msg)
-        log_container.markdown(
-            "<div style='background:#1a1a2e;padding:10px;border-radius:8px;"
-            "max-height:200px;overflow-y:auto;font-size:0.82em;'>"
-            + "<br>".join(log_lines[-12:])
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+        pass  # Arka planda çalışır, kullanıcıya gösterilmez
 
     orchestrator = Orchestrator()
 
-    with st.spinner("Ajanlar çalışıyor…"):
+    with st.spinner("Market fiyatları aranıyor…"):
         try:
             df, recipe_name, warnings, cheapest_market = asyncio.run(
-                orchestrator.run(
-                    f"{recipe_request} ({servings} kişilik)",
-                    on_hand, selected_district, loc, log_cb
-                )
+                orchestrator.run(recipe_request, on_hand, selected_district, loc, log_cb)
             )
         except Exception as exc:
             st.error(f"❌ Bir hata oluştu: {exc}")
             st.stop()
 
-    log_container.empty()
-
-    # ── Sonuçlar ──────────────────────────────────────────────────────────────
     if df.empty:
         st.info("Elinizdeki malzemeler yeterli — ekstra alışveriş gerekmez!")
     else:
         st.success(f"✅ **{recipe_name}** tarifi için alışveriş listesi hazır!")
 
-        # ── Uyarılar (Denetçi Düğümü çıktısı) ────────────────────────────────
+        # Uyarılar
         if warnings:
-            # Porsiyon hatalarını (🚨) ve çözümsüz kalemleri (❌) ayır
             critical = [w for w in warnings if w.startswith("🚨") or w.startswith("❌")]
             informational = [w for w in warnings if w not in critical]
             if critical:
@@ -179,8 +322,8 @@ if run_btn:
                     for w in informational:
                         st.warning(w)
 
+        # Fiyat tablosu
         st.subheader("📊 Fiyat Tablosu")
-
         display_cols = [c for c in ["Arama", "Product", "Market", "Neighborhood", "Price"] if c in df.columns]
         st.dataframe(
             df[display_cols].style.format({"Price": "{:.2f} ₺"}),
@@ -193,31 +336,16 @@ if run_btn:
         col_a.metric("🛒 Toplam Tutar", f"{total:.2f} ₺")
         col_b.metric("📦 Bulunan Ürün", f"{len(df)} kalem")
         col_c.metric("🏪 Farklı Market", f"{df['Market'].nunique()}")
-        col_d.metric(
-            "🏆 En Avantajlı Market",
-            cheapest_market or "—",
-            help="Sepetinizdeki ürünlerin toplam fiyatı en düşük olan market",
-        )
+        col_d.metric("🏆 En Avantajlı", cheapest_market or "—")
 
-        # ── Market bazlı maliyet dağılımı ─────────────────────────────────────
         if cheapest_market and df["Market"].nunique() > 1:
             market_summary = (
                 df.groupby("Market")["Price"]
-                .sum()
-                .sort_values()
-                .reset_index()
+                .sum().sort_values().reset_index()
                 .rename(columns={"Price": "Toplam (₺)"})
             )
             with st.expander("🏪 Markete Göre Toplam Maliyet"):
-                st.dataframe(
-                    market_summary.style.format({"Toplam (₺)": "{:.2f}"}),
-                    hide_index=True,
-                )
+                st.dataframe(market_summary.style.format({"Toplam (₺)": "{:.2f}"}), hide_index=True)
 
         csv = df.to_csv(index=False, encoding="utf-8-sig")
-        st.download_button(
-            label="⬇️ CSV İndir",
-            data=csv,
-            file_name="alisveris_listesi.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ CSV İndir", data=csv, file_name="alisveris_listesi.csv", mime="text/csv")
