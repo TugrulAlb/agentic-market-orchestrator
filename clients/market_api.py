@@ -123,7 +123,9 @@ def _relevance_score(query: str, product_name: str) -> float:
     token_score = fuzz.token_set_ratio(q, p)
     partial_score = fuzz.partial_ratio(q, p)
 
-    base_score = ratio_score * 0.6 + token_score * 0.2 + partial_score * 0.2
+    # token_set_ratio'ya daha yüksek ağırlık: "Toz Şeker 1 Kg" ↔ "Migros Toz Şeker 1 Kg" gibi
+    # suffix-format arama terimlerinde token bazlı eşleşme daha güvenilir
+    base_score = ratio_score * 0.4 + token_score * 0.4 + partial_score * 0.2
 
     # Token focus: tek bir query kelimesi çok uzun ürün adında gömülüyse
     # alaka skorunu düşür (örn: "kakao" vs "Migros Kids Stick Kakao ...").

@@ -82,20 +82,28 @@ class MarketState(TypedDict, total=False):
 # Sabitler
 # ──────────────────────────────────────────────────────────────────────────────
 
-MAX_RETRIES: int = 2
-RELEVANCE_THRESHOLD: float = 45.0
+MAX_RETRIES: int = 3
+RELEVANCE_THRESHOLD: float = 35.0
 
 # ── İçerik Gürültüsü ─────────────────────────────────────────────────────────
 # Ürün adında bu kalıplar geçiyorsa → içerik uyumsuzluğu → LLM retry
+# NOT: "bisküvi" çıkarıldı — kedi dili bisküvi gibi tarifte gerekli ürünler var
 _NOISE_RE = re.compile(
-    r"\b(gofret|kremal[iı]|aromal[iı]|meyveli|bisk[uü]vi|çikolatal[iı]|bıldırcın)\b",
+    r"\b(gofret|kremal[iı]|aromal[iı]|meyveli|çikolatal[iı]|bıldırcın)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# ── Kakao kalite filtresi ─────────────────────────────────────────────────────
+# "Kakao Tozu" aranırken Nesquik / Kids / içecek tozu gelmesini engelle
+_KAKAO_NOISE_RE = re.compile(
+    r"\b(nesquik|nestle|kids|çocuk|içecek|drinks?|milkshake|hazır)\b",
     re.IGNORECASE | re.UNICODE,
 )
 
 # ── Arama Terimi Birim Algılama ───────────────────────────────────────────────
-# Arama terimi "1L / 1Lt / 1Litre" istiyorsa:
+# Suffix formatı: "Tam Yağlı Süt 1 Lt" — sonda "1 Lt" var mı?
 _WANT_1L_RE = re.compile(r"\b1\s*[Ll](?:[Tt]|itre)?\b", re.IGNORECASE)
-# Arama terimi "1kg / 1Kg / 1kilo / 1kilogram" istiyorsa:
+# Suffix formatı: "Toz Şeker 1 Kg" — sonda "1 Kg" var mı?
 _WANT_1KG_RE = re.compile(r"\b1\s*k(?:g|ilo(?:gram)?)\b", re.IGNORECASE)
 
 # ── Ürün Porsiyon Boyutu Algılama (KRİTİK HATA eşiği) ───────────────────────
@@ -120,26 +128,27 @@ LogCallback = Callable[[str], Coroutine[Any, Any, None]]
 def _qty_mismatch_refined(term: str, product_name: str) -> Optional[str]:
     """
     Arama terimi ile bulunan ürün arasında birim uyumsuzluğu varsa
-    daha spesifik (filtreli) bir arama terimi döner; yoksa None.
+    farklı bir arama terimi döner; yoksa None.
 
-    Kural:
-        1L istendi + ≤ 750 ml ürün geldi  →  "1L X" → "1000ml X" (daha net)
-        1kg istendi + ≤ 500 g ürün geldi  →  "1kg X" → "1000g X" (daha net)
-
-    '1000ml' / '1000g' şeklinde yazmak market arama motorlarının
-    küçük porsiyonları döndürmesini azaltır.
+    Eğer üretilebilecek yeni terim mevcut termle AYNI ise None döner
+    → bu sayede sonsuz döngü engellenir, LLM yoluna yönlendirilir.
     """
+    candidate = None
+
     if _WANT_1L_RE.search(term) and _CRT_SMALL_ML_RE.search(product_name):
-        refined = re.sub(
-            r"\b1\s*[Ll](?:[Tt]|itre)?\b", "1000ml", term, flags=re.IGNORECASE
-        )
-        return refined.strip()
-    if _WANT_1KG_RE.search(term) and _CRT_SMALL_G_RE.search(product_name):
-        refined = re.sub(
-            r"\b1\s*k(?:g|ilo(?:gram)?)\b", "1000g", term, flags=re.IGNORECASE
-        )
-        return refined.strip()
-    return None
+        # Tüm "1 Lt/L/Lt" varyantlarını sil, "Tam" → alternatif biçim dene
+        cleaned = re.sub(r"(\s*\b1\s*[Ll](?:[Tt]|itre)?\b)+", "", term, flags=re.IGNORECASE).strip()
+        candidate = f"{cleaned} 1 Lt" if cleaned else None
+
+    elif _WANT_1KG_RE.search(term) and _CRT_SMALL_G_RE.search(product_name):
+        cleaned = re.sub(r"(\s*\b1\s*k(?:g|ilo(?:gram)?)\b)+", "", term, flags=re.IGNORECASE).strip()
+        candidate = f"{cleaned} 1 Kg" if cleaned else None
+
+    # Eğer candidate mevcut termle aynıysa ya da None ise → None döndür
+    # (sonsuz döngü engeli: aynı terimle tekrar markete gitmenin anlamı yok)
+    if candidate is None or candidate.strip().lower() == term.strip().lower():
+        return None
+    return candidate
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -210,6 +219,16 @@ async def market_search_checker_node(
             content_retry_terms.append(term)
             continue
 
+        # ── Kural 1b: Kakao özel filtresi (Nesquik, çocuk içeceği vb.) ───────
+        term_lower = term.casefold()
+        if "kakao" in term_lower and _KAKAO_NOISE_RE.search(product_name):
+            await log_cb(
+                f"🚫 **{term}** → '{product_name}' kakao içeceği, pişirme kakasu değil. "
+                "LLM ile rafine edilecek."
+            )
+            content_retry_terms.append(term)
+            continue
+
         # ── Kural 2: Alaka skoru ─────────────────────────────────────────────
         if relevance < RELEVANCE_THRESHOLD:
             await log_cb(
@@ -222,6 +241,7 @@ async def market_search_checker_node(
         # ── Kural 3: Porsiyon/Birim Uyumsuzluğu (KRİTİK) ────────────────────
         refined = _qty_mismatch_refined(term, product_name)
         if refined is not None:
+            # Refined term mevcut termden farklıysa → doğrudan markete gönder
             qty_retry_map[term] = refined
             msg = (
                 f"🚨 **Porsiyon Hatası** — '{term}' için '{product_name}' bulundu. "
@@ -230,7 +250,17 @@ async def market_search_checker_node(
             )
             warnings.append(msg)
             await log_cb(msg)
-            continue  # Bu ürün temizlendi; LLM'e değil, doğrudan markete gidecek
+            continue
+        elif (_WANT_1L_RE.search(term) and _CRT_SMALL_ML_RE.search(product_name)) or \
+             (_WANT_1KG_RE.search(term) and _CRT_SMALL_G_RE.search(product_name)):
+            # refined=None ama porsiyon uyumsuzluğu var → LLM'e eskalasyon
+            # (API bu terimle her zaman küçük paket döndürüyor, farklı terim gerekli)
+            await log_cb(
+                f"⬆️  **{term}** → Porsiyon hatası, alternatif terim üretilemedi. "
+                "LLM ile yeni arama terimi üretiliyor."
+            )
+            content_retry_terms.append(term)
+            continue
 
         cleaned.append(result)
 
@@ -310,7 +340,14 @@ async def final_report_node(
     """
     await log_cb("📝 **Sunucu Düğümü** — Final rapor hazırlanıyor…")
 
-    results: List[Dict[str, Any]] = state.get("cleaned_results", [])
+    # ── Duplicate temizleme (aynı Arama terimi birden fazla kez geldiyse son olanı al)
+    raw_results: List[Dict[str, Any]] = state.get("cleaned_results", [])
+    seen_arama: Dict[str, Dict[str, Any]] = {}
+    for r in raw_results:
+        key = r.get("Arama", "")
+        if key not in seen_arama:
+            seen_arama[key] = r
+    results: List[Dict[str, Any]] = list(seen_arama.values())
     recipe_name: str = state.get("recipe_name", "Bilinmiyor")
     warnings: List[str] = list(state.get("warnings", []))
 

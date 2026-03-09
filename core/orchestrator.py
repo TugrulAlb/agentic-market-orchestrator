@@ -124,29 +124,32 @@ class Orchestrator:
                         terms_to_search: List[str] = state["search_terms"]
                     else:
                         # LLM retry: başarısız terimleri rafine et
-                        # (hem içerik hem de qty hataları LLM'e gönderilmiş ola.)
                         refined: List[str] = analysis.get("search_terms", [])
                         old_retry_set = set(state.get("retry_terms", []))
                         surviving = [
                             t for t in state["search_terms"] if t not in old_retry_set
                         ]
-                        state["search_terms"] = surviving + refined
-                        terms_to_search = refined
+                        surviving_set = set(surviving)
+                        # Aynı terim tekrar üretilmişse eklenmesin
+                        new_refined = [t for t in refined if t not in surviving_set]
+                        state["search_terms"] = surviving + new_refined
+                        terms_to_search = new_refined
 
                 else:
                     # ── MARKET_SEARCH_NODE (Filtreli) — LLM ATLANMIYOR ───────
-                    # Denetçi, qty_retry_map içinde eski_terim → yeni_filtreli_terim
-                    # haritası bıraktı. Eski terimleri sil, yenilerini ekle.
                     qty_map: Dict[str, str] = state.get("qty_retry_map", {})
                     old_qty_keys = set(qty_map.keys())
-                    refined_terms = list(qty_map.values())
+                    refined_terms = list(dict.fromkeys(qty_map.values()))  # dedup + sıra koru
                     surviving = [
                         t for t in state["search_terms"] if t not in old_qty_keys
                     ]
-                    state["search_terms"] = surviving + refined_terms
-                    state["qty_retry_map"] = {}      # haritayı temizle
-                    state["content_retry_terms"] = [] # bu turda içerik sorunu yoktu
-                    terms_to_search = refined_terms
+                    # Duplicate önleme: refined_terms'ten surviving'de zaten olanları çıkar
+                    surviving_set = set(surviving)
+                    new_refined = [t for t in refined_terms if t not in surviving_set]
+                    state["search_terms"] = surviving + new_refined
+                    state["qty_retry_map"] = {}
+                    state["content_retry_terms"] = []
+                    terms_to_search = new_refined  # sadece gerçekten yeni terimler
 
                     await log_cb(
                         f"🔎 **Porsiyon Filtresi Aktif** — "
@@ -246,5 +249,3 @@ class Orchestrator:
         df = pd.DataFrame(results)
         df = df.sort_values("Price").reset_index(drop=True)
         return df, recipe_name, warnings, cheapest_market
-
-
