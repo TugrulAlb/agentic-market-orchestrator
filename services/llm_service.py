@@ -34,18 +34,15 @@ _FETCH_PRICE_TOOL: Dict[str, Any] = {
         "description": (
             "Belirtilen malzeme adına göre yakın çevredeki marketlerden "
             "en uygun fiyatı ve market bilgisini döner. "
-            "ZORUNLU FORMAT: Türk market API'leri 'Ürün Adı Miktar Birim' formatını kullanır — "
-            "miktar SONDA olmalı, başta değil. "
-            "(1) Süt türevleri → sonda '1 Lt' ekle (örn: 'Tam Yağlı Süt 1 Lt'). "
-            "(2) Kuru gıdalar → sonda '1 Kg' ekle (örn: 'Toz Şeker 1 Kg', 'Buğday Unu 1 Kg'). "
+            "Bir malzemenin güncel fiyatını öğrenmek istediğinde bu aracı kullan. "
+            "ZORUNLU FORMAT KURALLARI (miktar SONDA gelir, başta değil): "
+            "(1) Süt → 'Tam Yağlı Süt 1 Lt', 'Yarım Yağlı Süt 1 Lt' — '1L Süt' GEÇERSİZ. "
+            "(2) Kuru gıda → 'Toz Şeker 1 Kg', 'Buğday Unu 1 Kg' — '1kg Şeker' GEÇERSİZ. "
             "(3) Yumurta → 'Yumurta 10 Lu' veya 'Yumurta 15 Li'. "
-            "(4) Kahve → 'Türk Kahvesi 100 G', 'Filtre Kahve 250 G', 'Espresso Kahve 250 G'. "
-            "    'Espresso' veya '500ml Espresso' YASAK. "
-            "(5) Peynir → 'Labne Peyniri', 'Mascarpone Peyniri 250 G'. "
-            "(6) Kakao → 'Kakao Tozu' veya 'Dr. Oetker Kakao' (Nesquik veya içecek kakaosu DEĞİL). "
-            "(7) Kedi dili bisküvi gibi tarifte ZORUNLU bisküvi → 'Kedi Dili Bisküvi' şeklinde ara. "
-            "    Genel yasak: 'kremalı', 'gofret', 'aromalı', 'meyveli', 'çikolatalı'. "
-            "(8) Aynı malzeme için bu aracı iki kez çağırma."
+            "(4) Kedi Dili Bisküvi → Tiramisu için gerekli, kullanılabilir. "
+            "    Yasak: 'kremalı', 'gofret', 'aromalı', 'meyveli', 'çikolatalı'. "
+            "(5) Kakao → 'Kakao Tozu' (Nesquik değil). "
+            "(6) Aynı malzeme için bu aracı iki kez çağırma."
         ),
         "parameters": {
             "type": "object",
@@ -53,10 +50,10 @@ _FETCH_PRICE_TOOL: Dict[str, Any] = {
                 "ingredient": {
                     "type": "string",
                     "description": (
-                        "Fiyatı aranacak malzeme adı. Format: 'Ürün Adı Miktar Birim' (miktar SONDA). "
-                        "Örnekler: 'Tam Yağlı Süt 1 Lt', 'Toz Şeker 1 Kg', 'Buğday Unu 1 Kg', "
-                        "'Yumurta 10 Lu', 'Dana Kıyma 500 G', 'Türk Kahvesi 100 G', 'Tereyağı 100 G'. "
-                        "ASLA başa miktar yazma: '1L Süt', '1kg Un', '10lu Tavuk Yumurtası' → GEÇERSİZ."
+                        "Fiyatı aranacak malzeme adı. Türkçe, birim içeren ve aranabilir olsun. "
+                        "Süt türevleri için '1L Tam Yağlı Süt', kuru gıdalar için '1kg Pilavlık Pirinç', "
+                        "yumurta için '10\'lu Tavuk Yumurtası', et için '500g Dana Kıyma' gibi. "
+                        "ASLA tek kelimeyle (örn: 'süt', 'şeker') aratma."
                     ),
                 }
             },
@@ -78,59 +75,55 @@ ve bunları en doğru formatta markette aratmaktır.
 4. Her sonucu kontrol et; tarife uymuyorsa daha spesifik mutfak terimiyle bir kez daha dene.
 5. Tüm fiyatlar onaylandıktan sonra aşağıdaki FINAL ÇIKTI formatında özet ver.
 
-─── KURAL 1: MARKET API FORMAT (KRİTİK) ──────────────────────────────────────
+─── KURAL 0: PORSİYON / GERÇEKÇİ MİKTAR ──────────────────────────────────────
 
-  Türk market API'leri ürünleri "Ürün Adı Miktar Birim" formatında indeksler.
-  Miktar SONDA gelir, başta değil!
+  ► Kullanıcı "X kişilik" diyorsa, market paketlerini buna göre seç.
+  ► Fazla satın almaktan kaçın — en küçük yeterli paket boyutunu seç.
 
-  Süt türevleri (süt, ayran, kefir vb.):
-    ✓ Sonda "1 Lt" ekle → "Tam Yağlı Süt 1 Lt", "Yarım Yağlı Süt 1 Lt"
-    ✗ "1L Süt", "1L Tam Yağlı Süt" → YANLIŞ FORMAT
+  Örnekler (4 kişilik tiramisu için):
+    ✓ "Kakao Tozu 100 G" (1kg değil)       ✓ "Toz Şeker 500 G" (1kg değil)
+    ✓ "Mascarpone Peyniri 250 G"           ✓ "Filtre Kahve 100 G" (granül de olur)
+    ✓ "Tam Yağlı Süt 500 Ml"              ✓ "Tereyağı 100 G"
+    ✓ "Yumurta 6 Li" veya "Yumurta 10 Lu" (tarife göre)
 
-  Şeker, un, pirinç, bakliyat ve kuru gıdalar:
-    ✓ Sonda "1 Kg" ekle → "Toz Şeker 1 Kg", "Buğday Unu 1 Kg", "Pilavlık Pirinç 1 Kg"
-    ✗ "1kg Toz Şeker", "1kg Un" → YANLIŞ FORMAT
-    ✓ Un için mutlaka → "Buğday Unu 1 Kg" (sadece "Un" veya "1kg Un" → GEÇERSİZ)
+  ► Kuru gıdalar için varsayılan "1 Kg" kullan YALNIZCA gerçekten 1kg gerekiyorsa.
+    (4 kişilik tarifte un, şeker genellikle 250-500g yeter)
+
+
+
+  ► Hiçbir malzemeyi ASLA tek kelimeyle aratma (örn: "süt", "şeker" → GEÇERSİZ).
+  ► Miktar ve birim SONDA gelir — BAŞTA değil.
+
+  Süt türevleri:
+    ✓ "Tam Yağlı Süt 1 Lt", "Yarım Yağlı Süt 1 Lt"
+    ✗ "1L Tam Yağlı Süt" → GEÇERSİZ (miktar başta olamaz)
+    ✗ Çocuk sütleri (200ml), aromalı sütler
+
+  Şeker, un, pirinç, bakliyat:
+    ✓ "Toz Şeker 1 Kg", "Buğday Unu 1 Kg", "Pilavlık Pirinç 1 Kg"
+    ✗ "1kg Toz Şeker" → GEÇERSİZ (miktar başta olamaz)
 
   Yumurta:
     ✓ "Yumurta 10 Lu" veya "Yumurta 15 Li"
-    ✗ "10'lu Tavuk Yumurtası", "Tavuk Yumurtası 10lu" → Çalışmaz
+    ✗ "10'lu Tavuk Yumurtası" → GEÇERSİZ
     ✗ Bıldırcın yumurtası → KESİNLİKLE YASAK
 
-  Kahve:
-    ✓ "Türk Kahvesi 100 G", "Filtre Kahve 250 G", "Espresso Kahve 250 G"
-    ✗ "500ml Espresso", "Espresso" → Espresso bir içecek türü, ürün adı değil
-
-  Peynir:
-    ✓ Kısa yaygın isim: "Labne Peyniri", "Mascarpone Peyniri 250 G"
-    ✗ "500g Mascarpone Peyniri" → başa gramaj yazma
-
-  Diğer malzemeler:
-    ✓ "Tereyağı 100 G", "Dana Kıyma 500 G", "Süzme Yoğurt 500 G"
+  Diğer malzemeler (miktar SONDA):
+    ✓ "Tereyağı 100 G", "Süzme Yoğurt 500 G", "Krema 200 Ml", "Feta Peyniri 200 G"
 
 ─── KURAL 2: YASAKLI KELİMELERDEN KAÇIŞ ──────────────────────────────────────
 
-  ✗ Arama terimlerinde ASLA kullanılmayacak kelimeler:
-     "kremalı" | "gofret" | "aromalı" | "meyveli" | "bisküvi" | "çikolatalı"
+  ✗ ASLA kullanılmayacak: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı"
+  ✓ Kedi Dili Bisküvi → Tiramisu için GEREKLİ, kullanılabilir
+  ► Kakao → "Kakao Tozu" (Nesquik veya çocuk içeceği değil, pişirme kakaosu)
+  ► Tatlı kaplaması → "Bitter Kuvertür Çikolata"
 
-  ► Kakao gerekiyorsa → "Kakao Tozu" veya "Dr. Oetker Kakao" kullan.
-    Nesquik, içecek tozu, çocuk kakaosu → KESİNLİKLE YASAK.
-  ► Tatlı kaplaması için → "Bitter Kuvertür Çikolata" gibi teknik mutfak terimleri tercih et.
+─── KURAL 3: TEKİLLEŞTİRME VE MANTIKlı ARAMA ─────────────────────────────────
 
-─── KURAL 2b: TARİFE ÖZGÜ MALZEMELER ─────────────────────────────────────────
-
-  Tiramisu için:
-    ✓ Kedi dili bisküvi → "Kedi Dili Bisküvi" (bisküvi kelimesi bu tarifte GEREKLİ)
-    ✓ Mascarpone → "Mascarpone Peyniri 250 G"
-    ✓ Espresso → "Espresso Kahve 250 G" veya "Filtre Kahve 250 G"
-
-  Genel kural: Tarifte ZORUNLU olan bir malzeme belirli bir ürün kategorisiyse
-  (bisküvi, kraker, makarna vb.) o kategori adını kullanmaktan çekinme.
-  Yasak kelimeler ALAKASIZ ürünleri engellemek içindir, gerekli malzemeleri değil.
-
-─── KURAL 3: TEKİLLEŞTİRME VE MANTIKLI ARAMA ─────────────────────────────────
-
-  ► Benzer veya birbiri yerine geçebilecek malzemeleri TEK arama teriminde birleştir.
+  ► Benzer veya birbiri yerine geçebilecek malzemeleri (örn: "şeker" ve "toz şeker")
+    TEK bir arama teriminde birleştir. Aynı ürün için iki kez API isteği atma.
+  ► Gelen fiyat sonucu tarife uymuyorsa (RelevanceScore < 45 veya alakasız ürün),
+    aramayı daha profesyonel ve teknik bir mutfak terimiyle YENİLE.
   ► Her malzeme için en fazla 2 deneme yap; hâlâ uygun sonuç gelmezse
     "bulunamadı" olarak işaretle. Hiçbir fiyatı asla uydurma.
   ► Tüm araç çağrıları tamamlanmadan final özet verme.
@@ -139,9 +132,9 @@ ve bunları en doğru formatta markette aratmaktır.
 Sadece geçerli JSON döndür, başka metin yazma:
 {
   "recipe": "<yemek adı — temiz tarif özeti>",
-  "missing_ingredients": ["<malzeme 1>", "<malzeme 2>"],
+  "missing_ingredients": ["<birim+malzeme 1>", "<birim+malzeme 2>"],
   "total_cost": <bulunan fiyatların sayısal toplamı, float>,
-  "summary": "<temiz tarif özeti + eksik malzemelerin listesi + seçilen ürünlerin fiyatları + toplam maliyet>"
+  "summary": "<temiz tarif özeti + eksik malzemelerin listesi + seçilen ürünlerin birimleriyle fiyatları + toplam maliyet içeren profesyonel rapor>"
 }
 """
 
@@ -350,35 +343,16 @@ tarifte GERÇEKTEN eksik olan malzemeleri standart market arama terimlerine dön
 
 ─── STANDARTLAŞTIRMA KURALLARI (KESİNLİKLE UYGULANACAK) ────────────────────────
 
-Süt türevleri  → Sonda "1 Lt" birimi ekle  │ Örn: "Tam Yağlı Süt 1 Lt", "Yarım Yağlı Süt 1 Lt"
-Kuru gıdalar   → Sonda "1 Kg" birimi ekle  │ Örn: "Toz Şeker 1 Kg", "Pilavlık Pirinç 1 Kg"
-Un             → "Buğday Unu 1 Kg"  (asla sadece "1kg Un" yazma)
-Yumurta        → "Yumurta 10 Lu" veya "Yumurta 15 Li"  (başa "Tavuk" veya tırnak ekleme)
-Et / Kıyma     → "Dana Kıyma 500 G" gibi gramajlı format
-Peynir         → Kısa ve yaygın isim: "Labne Peyniri", "Mascarpone Peyniri 250 G"
-Kahve          → "Filtre Kahve 250 G", "Türk Kahvesi 100 G", "Espresso Kahve 250 G"
-               → "500ml Espresso" ASLA yazma — Espresso bir içecek, arama terimi değil
-Tereyağı       → "Tereyağı 100 G" veya "Tuzsuz Tereyağı 250 G"
-Kakao          → "Kakao Tozu" (başına "Ham" ekleme — markette bu şekilde geçmiyor)
+Süt türevleri  → Daima "1L" birimi ekle  │ Örn: "1L Tam Yağlı Süt"
+Kuru gıdalar   → Daima "1kg" birimi ekle  │ Örn: "1kg Toz Şeker", "1kg Pilavlık Pirinç"
+Yumurta        → "10'lu Tavuk Yumurtası" veya "15'li Tavuk Yumurtası"  (bıldırcın YASAK)
+Diğerleri      → Miktar + form zorunlu    │ Örn: "500g Dana Kıyma", "100g Tereyağı"
 
-ASLA tek kelime veya birim-önekli format kullanma:
-  ✗ "1kg Un", "1L Süt", "10'lu Tavuk Yumurtası"  → GEÇERSİZ
-  ✓ "Buğday Unu 1 Kg", "Tam Yağlı Süt 1 Lt", "Yumurta 10 Lu"  → DOĞRU
-
+ASLA tek kelime kullanma ("süt", "şeker" → GEÇERSİZ).
 ASLA kullanma: "kremalı" | "gofret" | "aromalı" | "meyveli" | "çikolatalı"
+Kedi Dili bisküvi → Tiramisu için GEREKLİ, "Kedi Dili Bisküvi" şeklinde ara (yasak değil).
+Kakao gerekirse → "Kakao Tozu" (Nesquik veya aromalı kakao değil)
 Benzer malzemeleri (örn: "şeker" + "toz şeker") TEK arama teriminde birleştir.
-
-─── İSTİSNALAR ────────────────────────────────────────────────────────────────
-Kedi Dili bisküvi → Tiramisu gibi tariflerde GEREKLİ. "Kedi Dili Bisküvi" şeklinde ara.
-Kakao → "Kakao Tozu" veya "Dr. Oetker Kakao" — Nesquik veya içecek kakaosu DEĞİL.
-Bisküvi kelimesi yalnızca gerçekten bisküvi gerektiğinde kullanılabilir (örn. Tiramisu, cheesecake tabanı).
-
-─── MARKET ARAMA FORMATI (ALTIN KURAL) ─────────────────────────────────────────
-Türk market API'leri ürünleri şu formatta indeksler:
-  "Ürün Adı [Marka opsiyonel] Miktar Birim"
-  Örn: "Toz Şeker 1 Kg", "Tam Yağlı Süt 1 Lt", "Yumurta 10 Lu"
-
-Miktar ve birim SONDA olmalı, başta değil.
 """
 
 _SET_ANALYSIS_TOOL: Dict[str, Any] = {
@@ -398,9 +372,8 @@ _SET_ANALYSIS_TOOL: Dict[str, Any] = {
                     "items": {"type": "string"},
                     "description": (
                         "Markette aranacak standart terimler listesi. "
-                        "Format: 'Ürün Adı Miktar Birim' (miktar SONDA). "
-                        "Örnekler: 'Tam Yağlı Süt 1 Lt', 'Toz Şeker 1 Kg', "
-                        "'Buğday Unu 1 Kg', 'Yumurta 10 Lu', 'Türk Kahvesi 100 G'."
+                        "Her eleman birim içermeli: '1L Tam Yağlı Süt', "
+                        "'1kg Toz Şeker', '10\\'lu Tavuk Yumurtası', vb."
                     ),
                 },
             },

@@ -103,15 +103,8 @@ def _min_depot_price(product: Dict[str, Any]) -> Tuple[Optional[float], Optional
 def _relevance_score(query: str, product_name: str) -> float:
     """
     Arama terimi ile ürün adı arasındaki anlam benzerliğini 0–100 ölçeğinde döner.
-
-        Strateji:
-            - ratio           : genel metin benzerliği
-            - token_set_ratio : token bazlı kısmi eşleşmeler
-            - partial_ratio   : alt dizi eşleşmeleri
-
-        Not:
-            Sadece tek kelime geçti diye çok uzun ürün isimlerinin 100 puan almasını
-            engellemek için ratio skoruna daha yüksek ağırlık verilir.
+    token_set_ratio ağırlığı artırıldı — kısa query, uzun ürün adında gömülü olduğunda
+    daha iyi eşleşme sağlar (örn: "süt" → "Dost %3.1 Yağlı Süt 1 Lt").
     """
     q = query.casefold().strip()
     p = product_name.casefold().strip()
@@ -123,12 +116,10 @@ def _relevance_score(query: str, product_name: str) -> float:
     token_score = fuzz.token_set_ratio(q, p)
     partial_score = fuzz.partial_ratio(q, p)
 
-    # token_set_ratio'ya daha yüksek ağırlık: "Toz Şeker 1 Kg" ↔ "Migros Toz Şeker 1 Kg" gibi
-    # suffix-format arama terimlerinde token bazlı eşleşme daha güvenilir
-    base_score = ratio_score * 0.4 + token_score * 0.4 + partial_score * 0.2
+    # token_set_ratio'ya daha yüksek ağırlık: API kısa keyword döndürüyor,
+    # ürün adı daha uzun olabiliyor
+    base_score = ratio_score * 0.3 + token_score * 0.5 + partial_score * 0.2
 
-    # Token focus: tek bir query kelimesi çok uzun ürün adında gömülüyse
-    # alaka skorunu düşür (örn: "kakao" vs "Migros Kids Stick Kakao ...").
     if query_tokens and product_tokens:
         focus = min(len(query_tokens), len(product_tokens)) / len(product_tokens)
         focus_factor = 0.6 + (0.4 * focus)
@@ -137,16 +128,40 @@ def _relevance_score(query: str, product_name: str) -> float:
     return base_score
 
 
+def _api_keyword(item: str) -> str:
+    """
+    API'ye gönderilecek kısa arama terimi üretir.
+    Uzun terimler API'de kötü eşleşiyor; core keyword'ü çıkar.
+
+    Örnekler:
+        "1L Tam Yağlı Süt"    → "tam yağlı süt"
+        "1kg Toz Şeker"       → "toz şeker"
+        "10'lu Tavuk Yumurtası" → "yumurta"
+        "Kakao Tozu"          → "kakao"
+        "Kedi Dili Bisküvi"   → "kedi dili bisküvi"
+    """
+    import re as _re
+    s = item.strip()
+    # Baştaki miktar/birim prefix'ini sil: "1L", "1kg", "500g", "250ml" vb.
+    s = _re.sub(r"^\s*\d+\s*(?:kg|g|ml|lt?|litre|kilo(?:gram)?)\s*", "", s, flags=_re.IGNORECASE)
+    # Sondaki miktar/birim suffix'ini sil: "1 Lt", "1 Kg", "250 G" vb.
+    s = _re.sub(r"\s+\d+\s*(?:kg|g|ml|lt?|litre|kilo(?:gram)?)\s*$", "", s, flags=_re.IGNORECASE)
+    # Tırnak ve kesme işaretlerini temizle
+    s = s.replace("'", "").replace('"', "").strip()
+    return s.lower() if s else item.lower()
+
+
 def _best_product(query: str, products: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     Ürün listesinden en alakalı ve ucuz olanı seçer.
-
-        Sıralama kriteri (normalize edilmiş bileşik skor):
-            (Alaka * 0.5) + (Ucuzluk * 50)
-
-    Bu sayede "süt" araması ucuz ama alakasız "süt tozu" yerine
-    "yarım yağlı süt" sonucunu öne çıkarır.
+    - 1L süt istenirken 200ml ürünler filtrelenir
+    - Kakao aramasında içecek/Nesquik ürünleri penalize edilir
     """
+    import re as _re
+
+    want_1l = bool(_re.search(r"\b1\s*[Ll](?:[Tt]|itre)?\b|1000\s*ml", query, _re.IGNORECASE))
+    is_kakao = "kakao" in query.casefold()
+
     candidates: List[Tuple[float, float, Dict, Optional[Dict]]] = []
 
     for product in products:
@@ -164,7 +179,19 @@ def _best_product(query: str, products: List[Dict[str, Any]]) -> Optional[Dict[s
             product.get("title") or product.get("name")
             or product.get("urun") or ""
         )
+
+        # ── Filtre: 1L süt istenirken ≤200ml ürünleri tamamen ele ────────────
+        if want_1l and _re.search(r"\b[1-9]\d?\s*ml\b|\b1[0-9]{2}\s*ml\b|\b200\s*ml\b", name, _re.IGNORECASE):
+            # 200ml, 180ml gibi küçük boy → atla
+            if not _re.search(r"\b(750|800|900|1000|1[.,]?\s*[Ll]t?)\b", name, _re.IGNORECASE):
+                continue
+
         relevance = _relevance_score(query, name)
+
+        # ── Penalize: kakao içeceği / Nesquik ───────────────────────────────
+        if is_kakao and _re.search(r"\b(nesquik|kids|çocuk|içecek)\b", name, _re.IGNORECASE):
+            relevance *= 0.3  # büyük ceza
+
         candidates.append((relevance, price, product, depot))
 
     if not candidates:
@@ -257,8 +284,9 @@ class MarketAPIClient:
             MarketAPIParseError      : Yanıt JSON geçersizse
         """
         settings = self._settings
+        api_kw = _api_keyword(item)   # API'ye kısa terim gönder
         payload = {
-            "keywords": item,
+            "keywords": api_kw,       # "tam yağlı süt", "toz şeker" vb.
             "latitude": loc.latitude,
             "longitude": loc.longitude,
             "distance": loc.distance_km,
@@ -266,7 +294,7 @@ class MarketAPIClient:
         }
 
         if log_cb:
-            await log_cb(f"📡 **{item}** API'den çekiliyor…")
+            await log_cb(f"📡 **{item}** → API keyword: `{api_kw}`")
 
         own_client = http_client is None
         if own_client:

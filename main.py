@@ -110,37 +110,54 @@ with st.sidebar:
 # Ana Giriş
 # ──────────────────────────────────────────────────────────────────────────────
 
-col1, _ = st.columns([3, 1])
+col1, col2 = st.columns([3, 1])
 with col1:
     recipe_request = st.text_input(
         "Ne pişirmek istiyorsunuz?",
-        value="Konya usulü fırın kebabı yapmak istiyorum",
+        value="Tiramisu yapmak istiyorum",
+    )
+with col2:
+    servings = st.selectbox(
+        "👥 Kaç Kişilik?",
+        options=[1, 2, 3, 4, 5, 6, 8, 10],
+        index=3,
     )
 
 run_btn = st.button("🚀 Fiyatları Getir", type="primary")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Pipeline Çalıştırma — UI sadece Orchestrator'ı çağırır
-# ──────────────────────────────────────────────────────────────────────────────
 
 if run_btn:
     if not recipe_request.strip():
         st.warning("Lütfen bir yemek isteği girin.")
         st.stop()
 
+    log_container = st.empty()
+    log_lines: list[str] = []
+
     async def log_cb(msg: str) -> None:
-        _ = msg
+        log_lines.append(msg)
+        log_container.markdown(
+            "<div style='background:#1a1a2e;padding:10px;border-radius:8px;"
+            "max-height:200px;overflow-y:auto;font-size:0.82em;'>"
+            + "<br>".join(log_lines[-12:])
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
     orchestrator = Orchestrator()
 
     with st.spinner("Ajanlar çalışıyor…"):
         try:
             df, recipe_name, warnings, cheapest_market = asyncio.run(
-                orchestrator.run(recipe_request, on_hand, selected_district, loc, log_cb)
+                orchestrator.run(
+                    f"{recipe_request} ({servings} kişilik)",
+                    on_hand, selected_district, loc, log_cb
+                )
             )
         except Exception as exc:
             st.error(f"❌ Bir hata oluştu: {exc}")
             st.stop()
+
+    log_container.empty()
 
     # ── Sonuçlar ──────────────────────────────────────────────────────────────
     if df.empty:
