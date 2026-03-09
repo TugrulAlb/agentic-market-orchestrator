@@ -318,3 +318,152 @@ async def run_agentic_extraction(
         "total_cost": total_cost,
         "results": collected_results,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NODE 1 — RECIPE_ANALYZER_NODE  (Graph State Machine için)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ANALYZER_SYSTEM_PROMPT = """\
+Sen bir profesyonel şef ve stratejik satın alma uzmanısın.
+Görevin: kullanıcının yemek isteğini ve elimdeki malzemeleri analiz ederek
+tarifte GERÇEKTEN eksik olan malzemeleri standart market arama terimlerine dönüştürmek.
+
+─── STANDARTLAŞTIRMA KURALLARI (KESİNLİKLE UYGULANACAK) ────────────────────────
+
+Süt türevleri  → Daima "1L" birimi ekle  │ Örn: "1L Tam Yağlı Süt"
+Kuru gıdalar   → Daima "1kg" birimi ekle  │ Örn: "1kg Toz Şeker", "1kg Pilavlık Pirinç"
+Yumurta        → "10'lu Tavuk Yumurtası" veya "15'li Tavuk Yumurtası"  (bıldırcın YASAK)
+Diğerleri      → Miktar + form zorunlu    │ Örn: "500g Dana Kıyma", "100g Tereyağı"
+
+ASLA tek kelime kullanma ("süt", "şeker" → GEÇERSİZ).
+ASLA kullanma: "kremalı" | "gofret" | "aromalı" | "meyveli" | "bisküvi" | "çikolatalı"
+Kakao gerekirse → "Ham Kakao Tozu" veya "Toz Kakao"
+Benzer malzemeleri (örn: "şeker" + "toz şeker") TEK arama teriminde birleştir.
+"""
+
+_SET_ANALYSIS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "set_recipe_analysis",
+        "description": "Tarif analizi sonucunu yapılandırılmış olarak kaydet.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recipe_name": {
+                    "type": "string",
+                    "description": "Yemeğin normalleştirilmiş Türkçe adı.",
+                },
+                "search_terms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Markette aranacak standart terimler listesi. "
+                        "Her eleman birim içermeli: '1L Tam Yağlı Süt', "
+                        "'1kg Toz Şeker', '10\\'lu Tavuk Yumurtası', vb."
+                    ),
+                },
+            },
+            "required": ["recipe_name", "search_terms"],
+        },
+    },
+}
+
+
+async def analyze_recipe_node(
+    recipe_request: str,
+    on_hand: str,
+    log_cb: LogCallback,
+    *,
+    retry_terms: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    RECIPE_ANALYZER_NODE — Graph State Machine'in ilk düğümü için LLM çağrısı.
+
+    İlk çalışma: Tarifteki tüm eksik malzemeleri standart arama terimleriyle döner.
+    Retry modu : Yalnızca `retry_terms` listesindeki başarısız terimleri rafine eder.
+
+    Args:
+        recipe_request : Kullanıcının yemek isteği
+        on_hand        : Elimdeki malzemeler (virgülle ayrılmış)
+        log_cb         : Asenkron UI log callback'i
+        retry_terms    : Önceki turda kalite testini geçemeyen arama terimleri.
+                         None ise ilk analiz modu, dolu ise iyileştirme modu.
+
+    Returns:
+        {"recipe_name": str, "search_terms": [str, ...]}
+
+    Raises:
+        ValueError : Azure yapılandırması eksikse
+    """
+    settings = get_settings()
+    if not settings.is_llm_configured:
+        raise ValueError(
+            "Azure OpenAI bilgileri eksik. "
+            ".env veya .streamlit/secrets.toml içine "
+            "AZURE_ENDPOINT ve AZURE_API_KEY ekleyin."
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint=settings.azure_endpoint,
+        api_key=settings.azure_api_key,
+        api_version=settings.azure_api_ver,
+    )
+
+    if retry_terms:
+        # ── Retry modu: sadece başarısız terimleri iyileştir ──────────────────
+        await log_cb(
+            f"🔄 **Şef Düğümü** (rafine) — "
+            f"{len(retry_terms)} terim için daha spesifik alternatif üretiliyor…"
+        )
+        user_content = (
+            f"Tarif: {recipe_request}\n"
+            f"Elimdeki malzemeler: {on_hand.strip() or 'Yok'}\n\n"
+            "Aşağıdaki market arama terimleri için uygun sonuç gelmedi.\n"
+            "Her biri için daha spesifik, teknik bir mutfak terimi öner "
+            "(standartlaştırma kurallarına uy):\n"
+            + "\n".join(f"  • {t}" for t in retry_terms)
+        )
+    else:
+        # ── İlk analiz modu: tam tarif analizi ───────────────────────────────
+        await log_cb("🧑‍🍳 **Şef Düğümü** — Tarif analiz ediliyor, eksik malzemeler belirleniyor…")
+        user_content = (
+            f"Yapmak istediğim yemek: {recipe_request}\n"
+            f"Elimdeki malzemeler: {on_hand.strip() or 'Yok'}\n\n"
+            "Tarifteki tüm eksik malzemeleri standartlaştırma kurallarına göre listele."
+        )
+
+    response = await client.chat.completions.create(
+        model=settings.gpt_deployment,
+        messages=[
+            {"role": "system", "content": _ANALYZER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        tools=[_SET_ANALYSIS_TOOL],
+        # Tek araç var — modeli doğrudan çağırmaya zorla (güvenilir yapılandırılmış çıktı)
+        tool_choice={"type": "function", "function": {"name": "set_recipe_analysis"}},
+        temperature=0.1,
+    )
+
+    msg = response.choices[0].message
+    recipe_name = "Bilinmiyor"
+    search_terms: List[str] = []
+
+    if msg.tool_calls:
+        try:
+            args = json.loads(msg.tool_calls[0].function.arguments)
+            recipe_name = str(args.get("recipe_name", "Bilinmiyor")).strip()
+            raw_terms = args.get("search_terms", [])
+            # Boş ve tek kelimelik terimleri filtrele (güvenlik katmanı)
+            search_terms = [
+                t for t in raw_terms
+                if isinstance(t, str) and len(t.split()) > 1
+            ]
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    await log_cb(
+        f"✅ **Şef** — '{recipe_name}' | "
+        f"{len(search_terms)} arama terimi belirlendi."
+    )
+    return {"recipe_name": recipe_name, "search_terms": search_terms}

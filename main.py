@@ -135,7 +135,7 @@ if run_btn:
 
     with st.spinner("Ajanlar çalışıyor…"):
         try:
-            df, recipe_name = asyncio.run(
+            df, recipe_name, warnings, cheapest_market = asyncio.run(
                 orchestrator.run(recipe_request, on_hand, selected_district, loc, log_cb)
             )
         except Exception as exc:
@@ -147,6 +147,13 @@ if run_btn:
         st.info("Elinizdeki malzemeler yeterli — ekstra alışveriş gerekmez!")
     else:
         st.success(f"✅ **{recipe_name}** tarifi için alışveriş listesi hazır!")
+
+        # ── Uyarılar (Denetçi Düğümü çıktısı) ────────────────────────────────
+        if warnings:
+            with st.expander("⚠️ Denetçi Uyarıları", expanded=True):
+                for w in warnings:
+                    st.warning(w)
+
         st.subheader("📊 Fiyat Tablosu")
 
         display_cols = [c for c in ["Arama", "Product", "Market", "Neighborhood", "Price"] if c in df.columns]
@@ -157,10 +164,30 @@ if run_btn:
         )
 
         total = df["Price"].sum()
-        col_a, col_b, col_c = st.columns(3)
+        col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("🛒 Toplam Tutar", f"{total:.2f} ₺")
         col_b.metric("📦 Bulunan Ürün", f"{len(df)} kalem")
         col_c.metric("🏪 Farklı Market", f"{df['Market'].nunique()}")
+        col_d.metric(
+            "🏆 En Avantajlı Market",
+            cheapest_market or "—",
+            help="Sepetinizdeki ürünlerin toplam fiyatı en düşük olan market",
+        )
+
+        # ── Market bazlı maliyet dağılımı ─────────────────────────────────────
+        if cheapest_market and df["Market"].nunique() > 1:
+            market_summary = (
+                df.groupby("Market")["Price"]
+                .sum()
+                .sort_values()
+                .reset_index()
+                .rename(columns={"Price": "Toplam (₺)"})
+            )
+            with st.expander("🏪 Markete Göre Toplam Maliyet"):
+                st.dataframe(
+                    market_summary.style.format({"Toplam (₺)": "{:.2f}"}),
+                    hide_index=True,
+                )
 
         csv = df.to_csv(index=False, encoding="utf-8-sig")
         st.download_button(
